@@ -1,17 +1,22 @@
 """
-PolymarketEnv v4 — Edge-based statistical arbitrage.
+PolymarketEnv v4 — Model learns fair price, trades on edge.
 
-Core idea:
-  Model learns to estimate "fair price" from TA indicators + momentum,
-  compares it to Polymarket market price, and trades the difference (edge).
-
-  - If PM price < fair_price * (1 + threshold) → BUY UP (undervalued)
-  - If PM price > fair_price * (1 - threshold) → BUY DOWN (overvalued)
-  - If edge disappears (PM price converges to fair) → SELL (exit)
-
-The model does NOT predict price direction — it detects mispricing
-and bets on mean-reversion to fair value.
-
+Architecture:
+  Model (PPO) outputs action: 0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL
+  
+  "fair price" is NOT computed by formula. Instead, the model must learn
+  to estimate it from the observation features (TA, momentum, etc).
+  
+  The observation includes all 45 features from v3, plus:
+    - normalized time remaining
+    - spread
+  
+  The model implicitly learns fair price by predicting which direction
+  the price will move. Reward = actual PnL.
+  
+  Key: NO deterministic fair price. NO hard edge thresholds.
+  Model learns everything from PnL feedback.
+  
 Actions: 0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL_CLOSE
 """
 
@@ -29,14 +34,9 @@ TIMESTEPS_PER_PERIOD = 90
 TAKER_FEE_RATE = 0.025
 POSITION_SIZE_PCT = 0.10
 MIN_HOLD_STEPS = 3
-COOLDOWN_STEPS = 5
+COOLDOWN_STEPS = 3
 OVERTRADE_PENALTY = 0.002
-
-# Edge thresholds
-EDGE_MIN = 0.03       # minimum 3% edge to enter
-EDGE_EXIT = 0.005     # exit when edge < 0.5%
-
-N_FEATURES = 45        # same 45 features as v3
+N_FEATURES = 45
 
 _data_cache: Dict[Tuple[str, str], List[Dict]] = {}
 
@@ -48,66 +48,91 @@ class Position:
     size_usd: float
     shares: float
     entry_step: int
-    entry_fair_price: float  # fair price at entry
-    entry_edge: float        # edge at entry
 
 
-def compute_fair_price(state_dict: dict) -> float:
-    """
-    Compute "fair price" from TA indicators and momentum.
-    This is a deterministic function — model uses it as a reference.
-    
-    Components:
-    - Mean-reversion from Bollinger Bands (BB %B)
-    - Momentum from MACD histogram
-    - Trend from MA cross
-    - RSI-based correction
-    """
-    # Start from 0.5 (neutral)
-    fair = 0.5
-    
-    # Bollinger Band mean-reversion
-    # If price is below lower BB, fair value is higher (mean-reversion up)
-    # bb_pct_b < 0 → price below lower BB → fair > market
-    bb_pct_b = state_dict.get("bb_pct_b", 0.5)
-    fair += (0.5 - bb_pct_b) * 0.15  # ±0.075 from BB
-    
-    # MACD histogram — momentum signal
-    macd_hist = state_dict.get("macd_hist", 0.0)
-    fair += np.clip(macd_hist * 5.0, -0.05, 0.05)
-    
-    # MA cross — trend
-    ma_cross = state_dict.get("ma_cross_5_20", 0.0)
-    fair += np.clip(ma_cross * 3.0, -0.03, 0.03)
-    
-    # RSI — overbought/oversold mean-reversion
-    rsi = state_dict.get("rsi", 0.5)
-    fair += (0.5 - rsi) * 0.1  # ±0.05 from RSI
-    
-    # Momentum 10
-    momentum = state_dict.get("momentum_10", 0.0)
-    fair += np.clip(momentum * 2.0, -0.02, 0.02)
-    
-    return np.clip(fair, 0.05, 0.95)
+class FeatureExtractor:
+    """Extract 45 features from market state — same as v3."""
 
+    def __init__(self, lookback: int = 5):
+        self.lookback = lookback
+        self.price_history: List[float] = []
+        self.return_history: List[float] = []
 
-def compute_edge(pm_price: float, fair_price: float) -> float:
-    """
-    Edge = how much PM price deviates from fair price, as a fraction.
-    Positive edge = PM price is below fair (undervalued) → should go up
-    Negative edge = PM price is above fair (overvalued) → should go down
-    """
-    if fair_price <= 0 or fair_price >= 1:
-        return 0.0
-    return (fair_price - pm_price) / fair_price
+    def update(self, up_price: float) -> np.ndarray:
+        mid_price = float(up_price)
+        self.price_history.append(mid_price)
+        max_len = self.lookback + 1
+        if len(self.price_history) > max_len:
+            self.price_history = self.price_history[-max_len:]
+
+        if len(self.price_history) >= 2:
+            ret = self.price_history[-1] - self.price_history[-2]
+            self.return_history.append(ret)
+            if len(self.return_history) > self.lookback:
+                self.return_history = self.return_history[-self.lookback:]
+
+        features = np.zeros(N_FEATURES, dtype=np.float32)
+
+        # === Price features (0-4) ===
+        features[0] = np.clip(up_price, 0.0, 1.0)
+        features[1] = np.clip(1.0 - up_price, 0.0, 1.0)  # down_price
+        features[2] = np.clip(up_price + (1.0 - up_price) - 1.0, -0.1, 0.1) * 10.0  # spread
+
+        if len(self.price_history) >= 6:
+            features[3] = np.clip((self.price_history[-1] - self.price_history[-6]) * 10.0, -1.0, 1.0)
+        if len(self.price_history) >= 2:
+            features[4] = np.clip((self.price_history[-1] - self.price_history[0]) * 5.0, -1.0, 1.0)
+
+        # === Order Book features (5-9) ===
+        base_spread = 0.005 + 0.02 * (1.0 - abs(up_price - 0.5) * 2)
+        spread = min(base_spread, 0.05)
+        features[5] = np.clip(spread * 20.0, 0.0, 1.0)
+
+        if len(self.price_history) >= 6:
+            features[6] = np.clip((self.price_history[-1] - self.price_history[-6]) * 20.0, -1.0, 1.0)
+        if len(self.return_history) >= 2:
+            features[7] = np.clip(abs(self.return_history[-1]) * 50.0, 0.0, 1.0)
+        if len(self.return_history) >= 3:
+            features[8] = 1.0 if abs(self.return_history[-1]) > 0.05 else 0.0
+        if len(self.return_history) >= 3:
+            features[9] = np.clip((self.return_history[-1] - self.return_history[-3]) * 50.0, -1.0, 1.0)
+
+        # === Cross-market placeholder (10-13) — filled below ===
+        # These are filled by the env from Binance data
+
+        # === Time (14) ===
+        # Filled by env
+
+        # === Position (15-17) ===
+        features[15] = 0.0  # has_position
+        features[16] = 0.0  # position_side
+        features[17] = 0.0  # unrealized_pnl_pct
+
+        # === Regime (18-19) ===
+        if len(self.price_history) >= 5:
+            total_move = abs(self.price_history[-1] - self.price_history[-5])
+            total_range = sum(abs(self.return_history[-i]) for i in range(min(5, len(self.return_history))))
+            if total_range > 0:
+                features[18] = np.clip(total_move / total_range * 2.0 - 1.0, -1.0, 1.0)
+        if len(self.return_history) >= 5:
+            features[19] = np.clip(np.std(self.return_history[-5:]) * 200.0, 0.0, 1.0)
+
+        # === TA indicators (20-44) — filled by env ===
+
+        return features
+
+    def reset(self):
+        self.price_history.clear()
+        self.return_history.clear()
 
 
 class PolymarketEnvV4(gym.Env):
     """
-    Edge-based environment.
+    PPO environment for Polymarket 15-minute binary prediction markets.
+    Model learns from scratch — no deterministic fair price.
     
-    The observation includes the computed fair price and edge,
-    so the model can learn when edge is real vs noise.
+    Actions: 0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL_CLOSE
+    Reward: normalized PnL from closed positions
     """
 
     metadata = {"render_modes": ["human", "ansi"]}
@@ -137,6 +162,7 @@ class PolymarketEnvV4(gym.Env):
         if cache_key not in _data_cache:
             _data_cache[cache_key] = self._load_data(data_path, asset)
         self.raw_data = _data_cache[cache_key]
+        self.feature_extractor = FeatureExtractor(lookback=5)
 
         self.action_space = spaces.Discrete(4)  # HOLD=0, BUY_UP=1, BUY_DOWN=2, SELL=3
         self.observation_space = spaces.Box(
@@ -153,8 +179,7 @@ class PolymarketEnvV4(gym.Env):
         self.wins: int = 0
         self.losses: int = 0
         self.cooldown_counter: int = 0
-        self.last_fair_price: float = 0.5
-        self.last_edge: float = 0.0
+        self.episode_trades: int = 0
 
     def _load_data(self, path: str, asset: str) -> List[Dict]:
         """Load and parse expanded snapshots."""
@@ -199,75 +224,42 @@ class PolymarketEnvV4(gym.Env):
         print(f"[EnvV4] Loaded {len(data)} snapshots for {asset}")
         return data
 
-    def _get_state_dict(self, idx: int) -> dict:
-        """Get raw data entry as dict for fair price computation."""
-        if idx >= len(self.raw_data):
-            idx = len(self.raw_data) - 1
-        if idx < 0:
-            idx = 0
-        return self.raw_data[idx]
-
-    def _get_observation(self, idx: int) -> np.ndarray:
-        """
-        Build 45-feature observation.
-        Includes fair price and edge as additional info in the observation.
-        """
-        d = self._get_state_dict(idx)
-        obs = np.zeros(N_FEATURES, dtype=np.float32)
+    def _get_observation(self) -> np.ndarray:
+        """Build 45-feature observation from current data index."""
+        if self.current_data_idx >= len(self.raw_data):
+            self.current_data_idx = len(self.raw_data) - 1
+        d = self.raw_data[self.current_data_idx]
 
         up_price = d["up_price"]
         down_price = d["down_price"]
+        elapsed = d["timestamp"] - d.get("period_start", d["timestamp"])
 
-        # Compute fair price from TA
-        ta_dict = {}
-        for field in ["bb_pct_b", "macd_hist", "ma_cross_5_20", "rsi", "momentum_10",
-                       "ma_cross_10_20", "price_vs_sma20", "price_vs_ema50",
-                       "bb_width", "vol_ratio", "momentum_5", "macd_line"]:
-            ta_dict[field] = d.get(f"ta_{field}", 0.0)
+        # Update feature extractor
+        features = self.feature_extractor.update(up_price)
 
-        fair_price = compute_fair_price(ta_dict)
-        edge = compute_edge(up_price, fair_price)
-
-        # === Price features (0-4) ===
-        obs[0] = np.clip(up_price, 0.0, 1.0)
-        obs[1] = np.clip(down_price, 0.0, 1.0)
-        obs[2] = np.clip((up_price + down_price - 1.0) * 10.0, -1.0, 1.0)
-        obs[3] = np.clip(edge, -0.5, 0.5) * 2.0  # normalized edge
-        obs[4] = np.clip(fair_price - 0.5, -0.45, 0.45) * 2.0  # fair price deviation
-
-        # === Order book (5-9) ===
-        spread = up_price + down_price - 1.0
-        obs[5] = np.clip(spread * 20.0, -1.0, 1.0)
-        obs[6] = np.clip(edge * 5.0, -1.0, 1.0)  # edge magnified
-        obs[7] = np.clip(abs(edge) * 10.0, 0.0, 1.0)  # edge magnitude
-        obs[8] = 1.0 if abs(edge) > EDGE_MIN else 0.0  # has significant edge
-        obs[9] = np.clip((fair_price - up_price) * 5.0, -1.0, 1.0)  # fair vs market
-
-        # === Cross-market (10-13) ===
-        obs[10] = np.clip(d.get("ta_macd_hist", 0.0) * 10.0, -1.0, 1.0)
-        obs[11] = np.clip(d.get("ta_momentum_10", 0.0) * 5.0, -1.0, 1.0)
-        obs[12] = np.clip(d.get("ta_vol_ratio", 1.0) - 1.0, -1.0, 1.0)
-        obs[13] = np.clip(d.get("ta_rsi", 0.5) - 0.5, -0.5, 0.5) * 2.0
+        # === Cross-market (10-13) from Binance ===
+        features[10] = np.clip(d.get("ta_macd_hist", 0.0) * 5.0, -1.0, 1.0)
+        features[11] = np.clip(d.get("ta_momentum_10", 0.0) * 5.0, -1.0, 1.0)
+        features[12] = np.clip(d.get("ta_vol_ratio", 1.0) - 1.0, -1.0, 1.0)
+        features[13] = np.clip(d.get("ta_rsi", 0.5) - 0.5, -0.5, 0.5) * 2.0
 
         # === Time (14) ===
-        elapsed = d["timestamp"] - d.get("period_start", d["timestamp"])
         remaining = max(0, 900 - elapsed)
-        obs[14] = remaining / 900.0
+        features[14] = remaining / 900.0
 
         # === Position (15-17) ===
-        obs[15] = 1.0 if self.position is not None else 0.0
+        features[15] = 1.0 if self.position is not None else 0.0
         if self.position is not None:
-            obs[16] = float(self.position.side)
+            features[16] = float(self.position.side)
             current_price = up_price if self.position.side == 1 else down_price
             unrealized = (current_price - self.position.entry_price) * self.position.shares
-            obs[17] = np.clip(unrealized / self.position.size_usd, -1.0, 1.0)
+            features[17] = np.clip(unrealized / self.position.size_usd, -1.0, 1.0)
         else:
-            obs[16] = 0.0
-            obs[17] = 0.0
+            features[16] = 0.0
+            features[17] = 0.0
 
-        # === Regime (18-19) ===
-        obs[18] = np.clip(d.get("ta_ma_cross_5_20", 0.0) * 5.0, -1.0, 1.0)
-        obs[19] = np.clip(d.get("ta_bb_width", 0.0) * 20.0, 0.0, 1.0)
+        # === Regime (18-19) already set by extractor ===
+        # 18 = trend strength, 19 = volatility
 
         # === TA indicators (20-44) ===
         ta_fields = [
@@ -282,17 +274,17 @@ class PolymarketEnvV4(gym.Env):
         ]
         for i, field in enumerate(ta_fields):
             val = d.get(f"ta_{field}", 0.0)
-            obs[20 + i] = np.clip(float(val), -1.0, 1.0)
+            features[20 + i] = np.clip(float(val), -1.0, 1.0)
 
-        return obs
+        return features
 
-    def _open_position(self, side: int, price: float, fair_price: float, edge: float) -> bool:
+    def _open_position(self, side: int, price: float) -> bool:
         """Open a position. side=1 for UP, side=-1 for DOWN."""
         if self.position is not None:
             return False
         if self.cooldown_counter > 0 and self.cooldown_counter < COOLDOWN_STEPS:
             return False
-        if price < 0.05 or price > 0.95:
+        if price <= 0.01 or price >= 0.99:
             return False
 
         size_usd = self.capital * self.position_size_pct
@@ -308,8 +300,6 @@ class PolymarketEnvV4(gym.Env):
             size_usd=size_usd,
             shares=shares,
             entry_step=self.current_step,
-            entry_fair_price=fair_price,
-            entry_edge=edge,
         )
         self.capital -= fee
         self.trade_count += 1
@@ -335,59 +325,47 @@ class PolymarketEnvV4(gym.Env):
 
         self.position = None
         self.cooldown_counter = 0
+        self.episode_trades += 1
         return pnl, is_win
 
     def _execute_action(self, action: int) -> Tuple[float, bool]:
         """
-        Execute action with edge-based logic.
-        
-        BUY_UP: only if edge > EDGE_MIN (UP is undervalued)
-        BUY_DOWN: only if edge < -EDGE_MIN (DOWN is undervalued = UP overvalued)
-        SELL: only if edge has collapsed (mean-reversion happened)
+        Execute action with helper info in observation.
+        No hard rules — model learns when to buy/sell from PnL.
+        Only basic safety: can't sell without position, can't buy with position.
         """
         reward = 0.0
         trade_executed = False
         idx = self.current_data_idx
 
-        d = self._get_state_dict(idx)
+        d = self.raw_data[idx]
         up_price = d["up_price"]
         down_price = d["down_price"]
-
-        # Compute current fair price and edge
-        ta_dict = {field: d.get(f"ta_{field}", 0.0) for field in
-                   ["bb_pct_b", "macd_hist", "ma_cross_5_20", "rsi", "momentum_10"]}
-        fair_price = compute_fair_price(ta_dict)
-        edge = compute_edge(up_price, fair_price)
-        self.last_fair_price = fair_price
-        self.last_edge = edge
 
         if action == 0:  # HOLD
             pass
 
-        elif action == 1:  # BUY UP — only if UP is undervalued (positive edge)
-            if self.position is None and edge > EDGE_MIN:
-                if self._open_position(side=1, price=up_price, fair_price=fair_price, edge=edge):
+        elif action == 1:  # BUY UP
+            if self.position is None:
+                if self._open_position(side=1, price=up_price):
                     trade_executed = True
                     reward -= OVERTRADE_PENALTY
 
-        elif action == 2:  # BUY DOWN — only if UP is overvalued (negative edge)
-            if self.position is None and edge < -EDGE_MIN:
-                if self._open_position(side=-1, price=down_price, fair_price=fair_price, edge=-edge):
+        elif action == 2:  # BUY DOWN
+            if self.position is None:
+                if self._open_position(side=-1, price=down_price):
                     trade_executed = True
                     reward -= OVERTRADE_PENALTY
 
-        elif action == 3:  # SELL — exit if edge has collapsed
+        elif action == 3:  # SELL  position
             if self.position is not None:
                 steps_held = self.current_step - self.position.entry_step
                 if steps_held >= self.min_hold_steps:
-                    # Exit when edge has mostly disappeared
-                    current_edge_abs = abs(edge)
-                    if current_edge_abs < EDGE_EXIT:
-                        exit_price = up_price if self.position.side == 1 else down_price
-                        pnl, is_win = self._close_position(exit_price)
-                        if self.position_size_pct > 0:
-                            reward = pnl / (self.capital * self.position_size_pct + 1e-8)
-                        trade_executed = True
+                    exit_price = up_price if self.position.side == 1 else down_price
+                    pnl, is_win = self._close_position(exit_price)
+                    if self.capital > 0 and self.position_size_pct > 0:
+                        reward = pnl / (self.capital * self.position_size_pct + 1e-8)
+                    trade_executed = True
 
         return reward, trade_executed
 
@@ -402,19 +380,19 @@ class PolymarketEnvV4(gym.Env):
         self.wins = 0
         self.losses = 0
         self.cooldown_counter = COOLDOWN_STEPS
-        self.last_fair_price = 0.5
-        self.last_edge = 0.0
+        self.episode_trades = 0
+        self.feature_extractor.reset()
 
         start_range = max(10, len(self.raw_data) - self.max_steps - 10)
         self.current_data_idx = int(self.rng.integers(10, start_range))
 
-        # Warm up
-        for _ in range(3):
-            self._get_observation(self.current_data_idx)
+        # Warm up feature extractor
+        for _ in range(5):
+            self._get_observation()
             self.current_data_idx += 1
             self.current_step += 1
 
-        obs = self._get_observation(self.current_data_idx)
+        obs = self._get_observation()
         return obs, {"capital": self.capital, "step": self.current_step}
 
     def step(self, action):
@@ -447,7 +425,7 @@ class PolymarketEnvV4(gym.Env):
             if self.capital > 0:
                 trade_reward += pnl / (self.capital * self.position_size_pct + 1e-8)
 
-        obs = self._get_observation(self.current_data_idx)
+        obs = self._get_observation()
 
         info = {
             "capital": self.capital,
@@ -456,8 +434,7 @@ class PolymarketEnvV4(gym.Env):
             "wins": self.wins,
             "losses": self.losses,
             "step": self.current_step,
-            "fair_price": self.last_fair_price,
-            "edge": self.last_edge,
+            "episode_trades": self.episode_trades,
         }
         return obs, trade_reward, terminated, truncated, info
 
