@@ -34,9 +34,9 @@ jobs:
       - name: Find latest model
         id: model
         run: |
-          MODEL=$(ls -t models/ppo_v5_btc_steps*.zip 2>/dev/null | head -1)
+          MODEL=$(ls models/ppo_v5_btc_steps*.zip 2>/dev/null | head -1)
           if [ -z "$MODEL" ]; then
-            MODEL=$(ls -t models/ppo_*btc*.zip 2>/dev/null | head -1)
+            MODEL=$(ls models/ppo_*btc*.zip 2>/dev/null | head -1)
           fi
           echo "model=$MODEL" >> $GITHUB_OUTPUT
           echo "Latest model: $MODEL"
@@ -51,32 +51,26 @@ jobs:
             set -e
             echo "[Deploy] Stopping old bot..."
             systemctl stop rl-trader.service 2>/dev/null || true
-            pkill -f rl_live_trader.py 2>/dev/null || true
+            kill $(ps aux | grep rl_live_trader.py | grep -v grep | awk '{print $2}') 2>/dev/null || true
             sleep 2
 
-            echo "[Deploy] Syncing code..."
+            echo "[Deploy] Downloading code..."
+            mkdir -p /opt/rl_trader
             cd /opt/rl_trader
-            cp rl_live_trader.py rl_live_trader.py.bak
-            cp environment_v3.py environment_v3.py.bak
 
-            echo "[Deploy] Downloading new code..."
             # Download from GitHub raw
             curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/rl_live_trader.py" -o rl_live_trader.py
             curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/environment_v3.py" -o environment_v3.py
 
-            echo "[Deploy] Downloading model..."
-            MODEL="${{ steps.model.outputs.model }}"
-            if [ -n "$MODEL" ]; then
-              curl -sL "https://github.com/antonoved2/rl_polymarket/releases/latest/download/$(basename $MODEL)" -o models/$(basename $MODEL) 2>/dev/null || true
-            fi
+            echo "[Deploy] Model is already on VPS (not stored in git)"
 
             echo "[Deploy] Cleaning cache..."
-            find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-            find . -name "*.pyc" -delete 2>/dev/null || true
+            find /opt/rl_trader -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+            find /opt/rl_trader -name "*.pyc" -delete 2>/dev/null || true
 
             echo "[Deploy] Starting bot..."
             setsid /opt/rl_trader/venv/bin/python3 /opt/rl_trader/rl_live_trader.py \
-              --model /opt/rl_trader/models/ppo_v5_btc_steps500000.zip \
+              --model /opt/rl_trader/models/ppo_v4_btc_steps150000.zip \
               --asset btc \
               --hours 168 \
               --poll-interval 5 \
