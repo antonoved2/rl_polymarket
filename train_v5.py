@@ -1,10 +1,12 @@
 """
-PPO Training v9 — aggressive time penalty to force SELL usage.
+PPO Training v10 — edge-based statistical arbitrage.
 
-Key changes from v8:
-- TIME_PENALTY: 0.001 → 0.01 (10x increase)
-- Model must learn to exit quickly via SELL=3
-- Same 4 actions, no hard TP/SL
+Key changes from v9:
+- New environment_v4.py with fair price computation
+- Model learns to compare PM price vs fair price
+- BUY only when edge > 3% (mispricing detected)
+- SELL only when edge < 0.5% (mean-reversion complete)
+- Deterministic fair price from TA indicators
 """
 
 import argparse
@@ -20,7 +22,7 @@ from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 sys.path.insert(0, str(Path(__file__).parent))
-from environment_v3 import PolymarketEnvV3
+from environment_v4 import PolymarketEnvV4 as PolymarketEnvV3, MIN_HOLD_STEPS
 
 
 class ProfitCallback(BaseCallback):
@@ -71,7 +73,7 @@ def make_env(asset, data_path, seed=42):
             position_size_pct=0.10,
             taker_fee=0.025,
             max_steps_per_episode=90,
-            min_hold_steps=5,
+            min_hold_steps=MIN_HOLD_STEPS,
             seed=seed,
         )
     return _init
