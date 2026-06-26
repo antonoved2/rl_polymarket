@@ -68,15 +68,32 @@ BINANCE_URL = "https://api.binance.com/api/v3"
 MODEL_DIR = "/home/antonov5/.openclaw/workspace/rl_polymarket/models"
 DATA_PATH = "/opt/rl_trader/data/expanded_snapshots.jsonl"
 
-POLL_INTERVAL = 5       # seconds between ticks
-MIN_HOLD_STEPS = 5      # minimum ticks in position (5 * 5s = 25s)
+POLL_INTERVAL = 15      # seconds between ticks (Gamma API updates slowly)
+MIN_HOLD_STEPS = 3       # minimum ticks before TP/SL can trigger (3 * 15s = 45s)
 POSITION_SIZE_PCT = 0.10  # 10% of capital per trade
 TAKER_FEE = 0.025       # 2.5% taker fee (entry + exit)
 INITIAL_CAPITAL = 1000.0
 TAKE_PROFIT_PCT = 0.15  # 15% take profit
 STOP_LOSS_PCT = 0.10    # 10% stop loss
+PRICE_MIN = 0.05         # don't trade if price below this
+PRICE_MAX = 0.95         # don't trade if price above this
+
+# Telegram (optional)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 running = True
+
+
+def send_telegram(message):
+    """Send Telegram notification (silent fail if not configured)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=5)
+    except:
+        pass
 
 
 def handle_signal(signum, frame):
@@ -600,22 +617,7 @@ class RLTrader:
             return period_info.get("down_token_id", "")
 
         if action == 0:  # HOLD
-            # Check if we should close position (TP/SL or min hold)
-            if self.position is not None:
-                steps_held = self.current_step - self.position["entry_step"]
-                if steps_held >= MIN_HOLD_STEPS:
-                    side_str = "UP" if self.position["side"] == 1 else "DOWN"
-                    exit_price = get_price(side_str)
-                    if exit_price > 0:
-                        # TP/SL check
-                        pnl_pct = (exit_price - self.position["entry_price"]) / self.position["entry_price"]
-                        if self.position["side"] == 1:
-                            pnl_pct = pnl_pct  # positive if price went up
-                        else:
-                            pnl_pct = -pnl_pct  # positive if price went down (DOWN token)
-
-                        if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= -STOP_LOSS_PCT:
-                            return self._close_position(exit_price, current_period, elapsed)
+            # TP/SL check is handled in the main loop (before model.predict)
             return None
 
         elif action == 1:  # BUY UP
@@ -624,7 +626,7 @@ class RLTrader:
                 if size_usd < 1.0:
                     return None
                 entry_price = get_price("UP")
-                if entry_price <= 0.01 or entry_price >= 0.99:
+                if entry_price < PRICE_MIN or entry_price > PRICE_MAX:
                     return None
                 shares = size_usd / entry_price
                 fee = size_usd * TAKER_FEE
@@ -645,6 +647,8 @@ class RLTrader:
                 if token_id:
                     self.clob_manager.place_order(token_id, "BUY", entry_price, shares)
 
+                send_telegram(f"🟢 BUY UP @ {entry_price:.3f} | Size: ${size_usd:.2f} | Capital: ${self.capital:.2f}")
+
                 return {
                     "timestamp": now,
                     "action": "BUY_UP",
@@ -661,7 +665,7 @@ class RLTrader:
                 if size_usd < 1.0:
                     return None
                 entry_price = get_price("DOWN")
-                if entry_price <= 0.01 or entry_price >= 0.99:
+                if entry_price < PRICE_MIN or entry_price > PRICE_MAX:
                     return None
                 shares = size_usd / entry_price
                 fee = size_usd * TAKER_FEE
@@ -681,6 +685,8 @@ class RLTrader:
 
                 if token_id:
                     self.clob_manager.place_order(token_id, "BUY", entry_price, shares)
+
+                send_telegram(f"🔴 BUY DOWN @ {entry_price:.3f} | Size: ${size_usd:.2f} | Capital: ${self.capital:.2f}")
 
                 return {
                     "timestamp": now,
@@ -731,6 +737,10 @@ class RLTrader:
             "steps_held": self.current_step - pos["entry_step"],
         }
         self.trade_logger.log_trade(trade)
+
+        emoji = "✅" if trade["pnl"] > 0 else "❌"
+        send_telegram(f"{emoji} CLOSE {trade['side']} | P&L: ${trade['pnl']:.2f} | Capital: ${self.capital:.2f}")
+
         self.position = None
         return trade
 
@@ -784,21 +794,22 @@ class RLTrader:
                     time.sleep(poll_interval)
                     continue
 
-                # Auto-close position after MIN_HOLD_STEPS
+                # TP/SL check — close position if hit (after min hold)
                 if self.position is not None:
                     steps_held = self.current_step - self.position["entry_step"]
                     if steps_held >= MIN_HOLD_STEPS:
                         side_str = "UP" if self.position["side"] == 1 else "DOWN"
-                        exit_price = None
+                        current_price = None
                         for (p, s), price in market_prices.items():
                             if s == side_str:
-                                exit_price = price
+                                current_price = price
                                 break
-                        if exit_price is None:
-                            exit_price = 0.5
-                        print(f'[{iteration}] AUTO-CLOSE {side_str} after {steps_held} steps', flush=True)
-                        self._close_position(exit_price, current_period, elapsed)
-                        period_trades += 1
+                        if current_price is not None and self.position["entry_price"] > 0:
+                            pnl_pct = (current_price - self.position["entry_price"]) / self.position["entry_price"]
+                            if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= -STOP_LOSS_PCT:
+                                print(f'[{iteration}] TP/SL triggered: {pnl_pct:.3f}', flush=True)
+                                self._close_position(current_price, current_period, elapsed)
+                                period_trades += 1
 
                 # Model decision
                 action, _ = self.model.predict(obs, deterministic=True)
@@ -935,6 +946,17 @@ class RLTrader:
         with open(f"trade_logs/summary_{self.asset}.json", "w") as f:
             json.dump(summary, f, indent=2)
         print(f"\n[Summary] Saved to trade_logs/summary_{self.asset}.json")
+
+        # Telegram summary
+        emoji = "📈" if summary.get("total_pnl", 0) > 0 else "📉"
+        send_telegram(
+            f"{emoji} <b>Trade Summary — {self.asset.upper()}</b>\n"
+            f"Trades: {summary.get('total_trades', 0)} | "
+            f"WR: {summary.get('win_rate', 0)*100:.1f}%\n"
+            f"P&L: ${summary.get('total_pnl', 0):.2f}\n"
+            f"Capital: ${self.capital:.2f} "
+            f"({(self.capital - self.initial_capital) / self.initial_capital * 100:+.1f}%)"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

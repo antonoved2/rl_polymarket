@@ -1,12 +1,11 @@
 """
-PPO Training v5 — retrained with fixed environment.
+PPO Training v6 — TP/SL only, no timer-based close.
 
-Key changes from v4:
-- Fixed environment: proper PnL calculation, no side bias
-- Better reward shaping: profit/loss normalized by position size
-- Longer training: 500K steps
-- Evaluation during training
-- Saves best model by win rate
+Key changes from v5:
+- Position closed ONLY by TP/SL or end of period (no min_hold auto-close)
+- Price filter: don't trade if price < 0.05 or > 0.95
+- Longer hold durations → fewer trades, less fee drag
+- Same 45 features, same env architecture
 """
 
 import argparse
@@ -83,8 +82,8 @@ def evaluate_model(model, asset, data_path, n_episodes=50):
     all_stats = []
     for ep in range(n_episodes):
         obs = env.reset()
-        done = False
-        while not done:
+        done = [False]
+        while not done[0]:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, info = env.step(action)
             if done[0]:
