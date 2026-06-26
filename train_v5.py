@@ -111,7 +111,7 @@ def evaluate_model(model, asset, data_path, n_episodes=50):
 
 def train(
     asset="btc",
-    data_path="/home/antonov5/.openclaw/workspace/data_collector/data/expanded/expanded_snapshots.jsonl",
+    data_path="/opt/rl_trader/data/expanded_snapshots.jsonl",
     total_steps=500_000,
     seed=42,
     save_dir="/home/antonov5/.openclaw/workspace/rl_polymarket/models",
