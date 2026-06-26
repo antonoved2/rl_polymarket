@@ -623,11 +623,17 @@ class RLTrader:
         if self.cooldown_counter < COOLDOWN_TICKS:
             if action in (1, 2):
                 return None
-            if action == 0:
-                return None
 
         if action == 0:  # HOLD
-            # TP/SL check is handled in the main loop (before model.predict)
+            return None
+        elif action == 3:  # SELL — close position
+            if self.position is not None:
+                steps_held = self.current_step - self.position["entry_step"]
+                if steps_held >= MIN_HOLD_STEPS:
+                    side_str = "UP" if self.position["side"] == 1 else "DOWN"
+                    exit_price = get_price(side_str)
+                    if exit_price > 0:
+                        return self._close_position(exit_price, current_period, elapsed)
             return None
 
         elif action == 1:  # BUY UP
@@ -806,31 +812,14 @@ class RLTrader:
                     time.sleep(poll_interval)
                     continue
 
-                # TP/SL check — close position if hit (after min hold)
-                if self.position is not None:
-                    steps_held = self.current_step - self.position["entry_step"]
-                    if steps_held >= MIN_HOLD_STEPS:
-                        side_str = "UP" if self.position["side"] == 1 else "DOWN"
-                        current_price = None
-                        for (p, s), price in market_prices.items():
-                            if s == side_str:
-                                current_price = price
-                                break
-                        if current_price is not None and self.position["entry_price"] > 0:
-                            pnl_pct = (current_price - self.position["entry_price"]) / self.position["entry_price"]
-                            if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= -STOP_LOSS_PCT:
-                                print(f'[{iteration}] TP/SL triggered: {pnl_pct:.3f}', flush=True)
-                                self._close_position(current_price, current_period, elapsed)
-                                period_trades += 1
-
-                # Model decision
+                # Model decision (0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL)
                 action, _ = self.model.predict(obs, deterministic=True)
 
                 # Execute
                 result = self.execute_action(int(action), period_data, market_prices)
 
                 # Log
-                action_names = ["HOLD", "BUY_UP", "BUY_DOWN"]
+                action_names = ["HOLD", "BUY_UP", "BUY_DOWN", "SELL"]
                 pos_str = f"POS={'UP' if self.position and self.position['side']==1 else 'DOWN' if self.position else 'NONE'}"
 
                 if isinstance(result, dict):

@@ -1,11 +1,11 @@
 """
-PPO Training v7 — anti-churn, quality over quantity.
+PPO Training v8 — model learns to exit, no hard TP/SL.
 
-Key changes from v6:
-- Price filter tightened: 0.15–0.85 (was 0.05–0.95)
-- Cooldown: 5 ticks after each close before new entry
-- Overtrade penalty: -0.005 per trade
-- Goal: fewer, higher-quality entries
+Key changes from v7:
+- 4 actions: HOLD=0, BUY_UP=1, BUY_DOWN=2, SELL=3
+- No hard TP/SL — model decides when to close via SELL action
+- Time penalty for holding too long (increases with steps_held)
+- Same cooldown, price filter, overtrade penalty
 """
 
 import argparse

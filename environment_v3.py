@@ -33,12 +33,14 @@ TIMESTEPS_PER_PERIOD = 90  # 15 min / 10 sec per step
 TAKER_FEE_RATE = 0.025
 POSITION_SIZE_PCT = 0.10
 MIN_HOLD_STEPS = 5
-TAKE_PROFIT_PCT = 0.15   # 15% take profit
-STOP_LOSS_PCT = -0.10   # 10% stop loss
 PRICE_MIN = 0.15         # don't trade if price below this (avoid dead tokens)
 PRICE_MAX = 0.85         # don't trade if price above this (avoid near-certain)
 COOLDOWN_STEPS = 5       # wait after closing before entering
 OVERTRADE_PENALTY = 0.005  # small penalty per trade to discourage churning
+TIME_PENALTY = 0.001     # small per-step cost to encourage timely exits
+
+# v8: No hard TP/SL — model learns to exit via SELL action
+# Actions: 0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL_CLOSE
 
 
 @dataclass
@@ -239,7 +241,7 @@ class PolymarketEnvV3(gym.Env):
         self.raw_data = _data_cache[cache_key]
         self.feature_extractor = FeatureExtractor(lookback=5)
 
-        self.action_space = spaces.Discrete(3)  # HOLD=0, BUY_UP=1, BUY_DOWN=2
+        self.action_space = spaces.Discrete(4)  # HOLD=0, BUY_UP=1, BUY_DOWN=2, SELL=3
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(N_FEATURES,), dtype=np.float32
         )
@@ -418,38 +420,41 @@ class PolymarketEnvV3(gym.Env):
     def _execute_action(self, action: int) -> Tuple[float, bool]:
         """
         Execute action. Returns (reward, trade_executed).
-        Reward is based on realized PnL from closing positions.
-        Position is closed ONLY by TP/SL or at end of period (in step()).
+        0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL (close position)
+        No hard TP/SL — model learns when to exit.
         """
         reward = 0.0
         trade_executed = False
         idx = self.current_data_idx
 
         if action == 0:  # HOLD
-            pass
+            # Small time cost for holding too long
+            if self.position is not None:
+                steps_held = self.current_step - self.position.entry_step
+                reward -= TIME_PENALTY * steps_held  # increasing cost over time
+
         elif action == 1:  # BUY UP
             if self.position is None:
                 up_price = self.raw_data[idx]["up_price"]
                 if self._open_position(side=1, price=up_price):
                     trade_executed = True
-                    reward -= OVERTRADE_PENALTY  # small cost for entering
+                    reward -= OVERTRADE_PENALTY
+
         elif action == 2:  # BUY DOWN
             if self.position is None:
                 down_price = self.raw_data[idx]["down_price"]
                 if self._open_position(side=-1, price=down_price):
                     trade_executed = True
-                    reward -= OVERTRADE_PENALTY  # small cost for entering
+                    reward -= OVERTRADE_PENALTY
 
-        # TP/SL check — close position if hit (only after min_hold_steps)
-        if self.position is not None:
-            steps_held = self.current_step - self.position.entry_step
-            if steps_held >= self.min_hold_steps:
-                current_up = self.raw_data[idx]["up_price"]
-                current_down = self.raw_data[idx]["down_price"]
-                current_price = current_up if self.position.side == 1 else current_down
-                pnl_pct = (current_price - self.position.entry_price) / self.position.entry_price
-                if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= STOP_LOSS_PCT:
-                    pnl, is_win = self._close_position(current_price)
+        elif action == 3:  # SELL — close current position
+            if self.position is not None:
+                steps_held = self.current_step - self.position.entry_step
+                if steps_held >= self.min_hold_steps:  # can't exit immediately
+                    current_up = self.raw_data[idx]["up_price"]
+                    current_down = self.raw_data[idx]["down_price"]
+                    exit_price = current_up if self.position.side == 1 else current_down
+                    pnl, is_win = self._close_position(exit_price)
                     if self.position_size_pct > 0:
                         reward = pnl / (self.capital * self.position_size_pct + 1e-8)
                     trade_executed = True

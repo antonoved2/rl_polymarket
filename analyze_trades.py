@@ -273,5 +273,5 @@ def analyze_model(model_path, asset="btc", n_episodes=200):
 
 
 if __name__ == "__main__":
-    model_path = "/opt/rl_trader/models/ppo_v5_btc_steps500000"
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "/opt/rl_trader/models/ppo_v5_btc_steps500000"
     analyze_model(model_path, n_episodes=200)
