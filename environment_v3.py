@@ -35,8 +35,10 @@ POSITION_SIZE_PCT = 0.10
 MIN_HOLD_STEPS = 5
 TAKE_PROFIT_PCT = 0.15   # 15% take profit
 STOP_LOSS_PCT = -0.10   # 10% stop loss
-PRICE_MIN = 0.05         # don't trade if price below this
-PRICE_MAX = 0.95         # don't trade if price above this
+PRICE_MIN = 0.15         # don't trade if price below this (avoid dead tokens)
+PRICE_MAX = 0.85         # don't trade if price above this (avoid near-certain)
+COOLDOWN_STEPS = 5       # wait after closing before entering
+OVERTRADE_PENALTY = 0.005  # small penalty per trade to discourage churning
 
 
 @dataclass
@@ -251,6 +253,8 @@ class PolymarketEnvV3(gym.Env):
         self.total_pnl: float = 0.0
         self.wins: int = 0
         self.losses: int = 0
+        self.cooldown_counter: int = 0  # steps since last close
+        self.episode_trades: int = 0
 
     def _load_data(self, path: str, asset: str) -> List[Dict]:
         """Load and parse expanded snapshots for a specific asset."""
@@ -361,7 +365,9 @@ class PolymarketEnvV3(gym.Env):
         """Open a position. side=1 for UP, side=-1 for DOWN."""
         if self.position is not None:
             return False
-        if price <= 0.01 or price >= 0.99:
+        if self.cooldown_counter > 0 and self.cooldown_counter < COOLDOWN_STEPS:
+            return False
+        if price < PRICE_MIN or price > PRICE_MAX:
             return False
 
         size_usd = self.capital * self.position_size_pct
@@ -405,6 +411,8 @@ class PolymarketEnvV3(gym.Env):
             self.losses += 1
 
         self.position = None
+        self.cooldown_counter = 0  # start cooldown
+        self.episode_trades += 1
         return pnl, is_win
 
     def _execute_action(self, action: int) -> Tuple[float, bool]:
@@ -422,15 +430,15 @@ class PolymarketEnvV3(gym.Env):
         elif action == 1:  # BUY UP
             if self.position is None:
                 up_price = self.raw_data[idx]["up_price"]
-                if PRICE_MIN <= up_price <= PRICE_MAX:
-                    if self._open_position(side=1, price=up_price):
-                        trade_executed = True
+                if self._open_position(side=1, price=up_price):
+                    trade_executed = True
+                    reward -= OVERTRADE_PENALTY  # small cost for entering
         elif action == 2:  # BUY DOWN
             if self.position is None:
                 down_price = self.raw_data[idx]["down_price"]
-                if PRICE_MIN <= down_price <= PRICE_MAX:
-                    if self._open_position(side=-1, price=down_price):
-                        trade_executed = True
+                if self._open_position(side=-1, price=down_price):
+                    trade_executed = True
+                    reward -= OVERTRADE_PENALTY  # small cost for entering
 
         # TP/SL check — close position if hit (only after min_hold_steps)
         if self.position is not None:
@@ -458,6 +466,8 @@ class PolymarketEnvV3(gym.Env):
         self.total_pnl = 0.0
         self.wins = 0
         self.losses = 0
+        self.cooldown_counter = COOLDOWN_STEPS  # no cooldown at start
+        self.episode_trades = 0
         self.feature_extractor.reset()
 
         # Start at a random point in the data
@@ -484,6 +494,8 @@ class PolymarketEnvV3(gym.Env):
 
         self.current_step += 1
         self.current_data_idx += 1
+        if self.cooldown_counter < COOLDOWN_STEPS:
+            self.cooldown_counter += 1
 
         terminated = False
         truncated = False
@@ -517,6 +529,7 @@ class PolymarketEnvV3(gym.Env):
             "wins": self.wins,
             "losses": self.losses,
             "step": self.current_step,
+            "episode_trades": self.episode_trades,
         }
         return obs, trade_reward, terminated, truncated, info
 

@@ -75,8 +75,9 @@ TAKER_FEE = 0.025       # 2.5% taker fee (entry + exit)
 INITIAL_CAPITAL = 1000.0
 TAKE_PROFIT_PCT = 0.15  # 15% take profit
 STOP_LOSS_PCT = 0.10    # 10% stop loss
-PRICE_MIN = 0.05         # don't trade if price below this
-PRICE_MAX = 0.95         # don't trade if price above this
+PRICE_MIN = 0.15         # don't trade if price below this (avoid dead tokens)
+PRICE_MAX = 0.85         # don't trade if price above this
+COOLDOWN_TICKS = 5       # wait after closing before entering
 
 # Telegram (optional)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -543,6 +544,8 @@ class RLTrader:
         self.current_step = 0
         self.peak_capital = initial_capital
         self.total_pnl = 0.0
+        self.cooldown_counter = COOLDOWN_TICKS  # no cooldown at start
+        self.last_close_step = -999
 
         # Data
         self.feature_extractor = FeatureExtractor(lookback=5)
@@ -615,6 +618,13 @@ class RLTrader:
             if side_str == "UP":
                 return period_info.get("up_token_id", "")
             return period_info.get("down_token_id", "")
+
+        # Cooldown check — don't enter if recently closed
+        if self.cooldown_counter < COOLDOWN_TICKS:
+            if action in (1, 2):
+                return None
+            if action == 0:
+                return None
 
         if action == 0:  # HOLD
             # TP/SL check is handled in the main loop (before model.predict)
@@ -742,6 +752,8 @@ class RLTrader:
         send_telegram(f"{emoji} CLOSE {trade['side']} | P&L: ${trade['pnl']:.2f} | Capital: ${self.capital:.2f}")
 
         self.position = None
+        self.cooldown_counter = 0
+        self.last_close_step = self.current_step
         return trade
 
     def run(self, duration_hours=24, poll_interval=POLL_INTERVAL):
@@ -856,6 +868,8 @@ class RLTrader:
                 self.trade_logger.log_snapshot(snapshot)
 
                 self.current_step += 1
+                if self.cooldown_counter < COOLDOWN_TICKS:
+                    self.cooldown_counter += 1
 
                 # Period change check - close positions at end of period
                 if elapsed >= 895 and self.position is not None:

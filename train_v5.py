@@ -1,11 +1,11 @@
 """
-PPO Training v6 — TP/SL only, no timer-based close.
+PPO Training v7 — anti-churn, quality over quantity.
 
-Key changes from v5:
-- Position closed ONLY by TP/SL or end of period (no min_hold auto-close)
-- Price filter: don't trade if price < 0.05 or > 0.95
-- Longer hold durations → fewer trades, less fee drag
-- Same 45 features, same env architecture
+Key changes from v6:
+- Price filter tightened: 0.15–0.85 (was 0.05–0.95)
+- Cooldown: 5 ticks after each close before new entry
+- Overtrade penalty: -0.005 per trade
+- Goal: fewer, higher-quality entries
 """
 
 import argparse
@@ -42,6 +42,7 @@ class ProfitCallback(BaseCallback):
                 'trade_count': latest.get('trade_count', 0),
                 'wins': latest.get('wins', 0),
                 'losses': latest.get('losses', 0),
+                'episode_trades': latest.get('episode_trades', 0),
             }
             self.episode_stats.append(stats)
 
@@ -51,12 +52,14 @@ class ProfitCallback(BaseCallback):
             caps = [s['capital'] for s in self.episode_stats[-recent:]]
             wins = sum(s['wins'] for s in self.episode_stats[-recent:])
             losses = sum(s['losses'] for s in self.episode_stats[-recent:])
+            trades = sum(s['episode_trades'] for s in self.episode_stats[-recent:])
             total = wins + losses
             wr = wins / total * 100 if total > 0 else 0
             avg_pnl = np.mean(pnls)
             avg_cap = np.mean(caps)
+            avg_trades = trades / recent
             print(f"\n[Step {self.n_calls:,}] WR: {wr:.1f}% | Avg P&L: ${avg_pnl:.2f} | "
-                  f"Avg Capital: ${avg_cap:.2f} | Trades: {total}")
+                  f"Avg Cap: ${avg_cap:.2f} | Avg Trades/Ep: {avg_trades:.1f}")
         return True
 
 
