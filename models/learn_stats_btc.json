@@ -1,0 +1,67 @@
+[
+  {
+    "cycle": 1,
+    "period": 1782358200,
+    "trades": 34,
+    "wins": 2,
+    "win_rate": 5.88235294117647,
+    "pnl": -438.11368502447425,
+    "capital": 21777.200820215585,
+    "snapshots": 167,
+    "total_snapshots": 94175,
+    "train_time": 1428.812082529068,
+    "model": "/home/antonov5/.openclaw/workspace/rl_polymarket/models/ppo_learn_btc_20260625_040855_steps50000"
+  },
+  {
+    "cycle": 2,
+    "period": 1782360900,
+    "trades": 34,
+    "wins": 0,
+    "win_rate": 0.0,
+    "pnl": -1409.4167515470244,
+    "capital": 19856.318553284404,
+    "snapshots": 166,
+    "total_snapshots": 94502,
+    "train_time": 82.99652910232544,
+    "model": "/home/antonov5/.openclaw/workspace/rl_polymarket/models/ppo_learn_btc_20260625_043125_steps50000"
+  },
+  {
+    "cycle": 3,
+    "period": 1782362700,
+    "trades": 28,
+    "wins": 0,
+    "win_rate": 0.0,
+    "pnl": -1683.1458610781583,
+    "capital": 10658.448367054854,
+    "snapshots": 166,
+    "total_snapshots": 94668,
+    "train_time": 82.42142796516418,
+    "model": "/home/antonov5/.openclaw/workspace/rl_polymarket/models/ppo_learn_btc_20260625_050123_steps50000"
+  },
+  {
+    "cycle": 4,
+    "period": 1782364500,
+    "trades": 34,
+    "wins": 1,
+    "win_rate": 2.941176470588235,
+    "pnl": 389.38673854183025,
+    "capital": 22078.887010450377,
+    "snapshots": 166,
+    "total_snapshots": 94834,
+    "train_time": 85.96853542327881,
+    "model": "/home/antonov5/.openclaw/workspace/rl_polymarket/models/ppo_learn_btc_20260625_053127_steps50000"
+  },
+  {
+    "cycle": 5,
+    "period": 1782366300,
+    "trades": 34,
+    "wins": 1,
+    "win_rate": 2.941176470588235,
+    "pnl": -1646.6517612243779,
+    "capital": 19451.633695172502,
+    "snapshots": 167,
+    "total_snapshots": 95001,
+    "train_time": 83.57876372337341,
+    "model": "/home/antonov5/.openclaw/workspace/rl_polymarket/models/ppo_learn_btc_20260625_060127_steps50000"
+  }
+]

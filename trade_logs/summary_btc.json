@@ -1,0 +1,16 @@
+{
+  "asset": "btc",
+  "total_trades": 1,
+  "wins": 0,
+  "losses": 1,
+  "win_rate": 0.0,
+  "total_pnl": -7.261904761904766,
+  "avg_pnl": -7.261904761904766,
+  "avg_win": 0,
+  "avg_loss": -7.261904761904766,
+  "max_win": 0,
+  "max_loss": -7.261904761904766,
+  "final_capital": 1090.2380952380952,
+  "total_return_pct": 9.023809523809518,
+  "timestamp": 1782332690
+}

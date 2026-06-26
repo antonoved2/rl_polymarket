@@ -1,0 +1,9 @@
+{"timestamp": 1782330274, "action": "BUY_DOWN", "price": 0.485, "size_usd": 100.0, "shares": 206.18556701030928, "elapsed_sec": 874, "capital": 997.5}
+{"timestamp": 1782330414, "action": "BUY_DOWN", "price": 0.435, "size_usd": 100.0, "shares": 229.88505747126436, "elapsed_sec": 114, "capital": 997.5}
+{"timestamp": 1782330566, "action": "BUY_DOWN", "price": 0.435, "size_usd": 100.0, "shares": 229.88505747126436, "elapsed_sec": 266, "capital": 997.5}
+{"timestamp": 1782330737, "action": "BUY_DOWN", "price": 0.525, "size_usd": 100.0, "shares": 190.47619047619048, "elapsed_sec": 437, "capital": 997.5}
+{"timestamp": 1782330889, "action": "BUY_DOWN", "price": 0.525, "size_usd": 100.0, "shares": 190.47619047619048, "elapsed_sec": 589, "capital": 997.5}
+{"timestamp": 1782331116, "action": "BUY_DOWN", "price": 0.285, "size_usd": 100.0, "shares": 350.87719298245617, "elapsed_sec": 816, "capital": 997.5}
+{"timestamp": 1782331277, "action": "BUY_DOWN", "price": 0.505, "size_usd": 100.0, "shares": 198.01980198019803, "elapsed_sec": 77, "capital": 997.5}
+{"timestamp": 1782331351, "action": "BUY_DOWN", "price": 0.505, "size_usd": 109.5, "shares": 216.83168316831683, "elapsed_sec": 151, "capital": 1092.2625}
+{"timestamp": 1782331426, "action": "BUY_UP", "price": 0.265, "size_usd": 124.88962871287129, "shares": 471.28161778441995, "elapsed_sec": 226, "capital": 1245.774046410891}

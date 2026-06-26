@@ -1,0 +1,50 @@
+[
+  {
+    "strategy": "Random",
+    "n_episodes": 200,
+    "avg_capital": 5362.860899377675,
+    "std_capital": 4938.301144043525,
+    "avg_pnl": 1344.488084221204,
+    "std_pnl": 3224.0949653195844,
+    "avg_return_pct": 436.28608993776754,
+    "std_return_pct": 493.8301144043525,
+    "avg_trades": 12.43,
+    "win_rate": 0.59,
+    "max_return": 3411.880751795482,
+    "min_return": 57.78747013953976,
+    "median_return": 249.9106576740553,
+    "sharpe": 0.8834740474748216
+  },
+  {
+    "strategy": "Buy&Hold",
+    "n_episodes": 200,
+    "avg_capital": 5421.113194738242,
+    "std_capital": 4469.530573544955,
+    "avg_pnl": 1165.564925972198,
+    "std_pnl": 3132.602601393194,
+    "avg_return_pct": 442.11131947382427,
+    "std_return_pct": 446.95305735449546,
+    "avg_trades": 13.715,
+    "win_rate": 0.6,
+    "max_return": 4205.204106183762,
+    "min_return": 85.24988451017218,
+    "median_return": 307.82050154684123,
+    "sharpe": 0.9891672340058947
+  },
+  {
+    "strategy": "Momentum",
+    "n_episodes": 200,
+    "avg_capital": 3288.7281745331024,
+    "std_capital": 817.2819706317028,
+    "avg_pnl": -145.10088839576213,
+    "std_pnl": 569.4952008048608,
+    "avg_return_pct": 228.87281745331023,
+    "std_return_pct": 81.72819706317027,
+    "avg_trades": 13.65,
+    "win_rate": 0.245,
+    "max_return": 1044.7320159608373,
+    "min_return": 83.65061235259864,
+    "median_return": 217.98275463162685,
+    "sharpe": 2.800414369552375
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "model": "ppo_v4_ta_45feat",
+  "n_episodes": 200,
+  "avg_capital": 7603.079027828776,
+  "avg_pnl": 2610.5916760863156,
+  "avg_return_pct": 660.3079027828775,
+  "median_return_pct": 443.45389418636796,
+  "win_rate": 0.775,
+  "std_return_pct": 667.3986114169753,
+  "min_return_pct": 41.84286944766152,
+  "max_return_pct": 4190.449938402869,
+  "sharpe": 0.9893756017576313
+}

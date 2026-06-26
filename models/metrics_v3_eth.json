@@ -1,0 +1,9 @@
+{
+  "total_steps": 150000,
+  "elapsed_sec": 10690.434973239899,
+  "n_episodes": 0,
+  "avg_reward": 0,
+  "avg_pnl": 0,
+  "avg_trades": 0,
+  "win_rate": 0
+}

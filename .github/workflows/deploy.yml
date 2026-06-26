@@ -1,0 +1,104 @@
+name: Build and Deploy RL Trader
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install stable-baselines3==2.3.0 gymnasium numpy requests
+          pip install py-clob-client
+
+      - name: Verify environment
+        run: |
+          python -c "from environment_v3 import PolymarketEnvV3; print('Env OK')"
+          python -c "from rl_live_trader import RLTrader; print('Trader OK')"
+
+      - name: Find latest model
+        id: model
+        run: |
+          MODEL=$(ls -t models/ppo_v5_btc_steps*.zip 2>/dev/null | head -1)
+          if [ -z "$MODEL" ]; then
+            MODEL=$(ls -t models/ppo_*btc*.zip 2>/dev/null | head -1)
+          fi
+          echo "model=$MODEL" >> $GITHUB_OUTPUT
+          echo "Latest model: $MODEL"
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            echo "[Deploy] Stopping old bot..."
+            systemctl stop rl-trader.service 2>/dev/null || true
+            pkill -f rl_live_trader.py 2>/dev/null || true
+            sleep 2
+
+            echo "[Deploy] Syncing code..."
+            cd /opt/rl_trader
+            cp rl_live_trader.py rl_live_trader.py.bak
+            cp environment_v3.py environment_v3.py.bak
+
+            echo "[Deploy] Downloading new code..."
+            # Download from GitHub raw
+            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/rl_live_trader.py" -o rl_live_trader.py
+            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/environment_v3.py" -o environment_v3.py
+
+            echo "[Deploy] Downloading model..."
+            MODEL="${{ steps.model.outputs.model }}"
+            if [ -n "$MODEL" ]; then
+              curl -sL "https://github.com/antonoved2/rl_polymarket/releases/latest/download/$(basename $MODEL)" -o models/$(basename $MODEL) 2>/dev/null || true
+            fi
+
+            echo "[Deploy] Cleaning cache..."
+            find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+            find . -name "*.pyc" -delete 2>/dev/null || true
+
+            echo "[Deploy] Starting bot..."
+            setsid /opt/rl_trader/venv/bin/python3 /opt/rl_trader/rl_live_trader.py \
+              --model /opt/rl_trader/models/ppo_v5_btc_steps500000.zip \
+              --asset btc \
+              --hours 168 \
+              --poll-interval 5 \
+              --capital 1000 \
+              --dry-run \
+              --position-size 0.10 \
+              > /tmp/rl_trader.log 2>&1 &
+
+            echo "[Deploy] Done! PID: $!"
+            sleep 3
+            tail -5 /tmp/rl_trader.log
+
+      - name: Notify Telegram
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          MSG="🤖 RL Trader Deploy: ${STATUS}\n"
+          MSG+="Branch: ${{ github.ref_name }}\n"
+          MSG+="Commit: ${{ github.sha }}\n"
+          MSG+="Model: ${{ steps.model.outputs.model }}\n"
+          MSG+="Time: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" || true
