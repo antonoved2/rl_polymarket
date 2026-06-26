@@ -1,11 +1,10 @@
 """
-PPO Training v8 — model learns to exit, no hard TP/SL.
+PPO Training v9 — aggressive time penalty to force SELL usage.
 
-Key changes from v7:
-- 4 actions: HOLD=0, BUY_UP=1, BUY_DOWN=2, SELL=3
-- No hard TP/SL — model decides when to close via SELL action
-- Time penalty for holding too long (increases with steps_held)
-- Same cooldown, price filter, overtrade penalty
+Key changes from v8:
+- TIME_PENALTY: 0.001 → 0.01 (10x increase)
+- Model must learn to exit quickly via SELL=3
+- Same 4 actions, no hard TP/SL
 """
 
 import argparse

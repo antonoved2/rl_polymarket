@@ -37,7 +37,7 @@ PRICE_MIN = 0.15         # don't trade if price below this (avoid dead tokens)
 PRICE_MAX = 0.85         # don't trade if price above this (avoid near-certain)
 COOLDOWN_STEPS = 5       # wait after closing before entering
 OVERTRADE_PENALTY = 0.005  # small penalty per trade to discourage churning
-TIME_PENALTY = 0.001     # small per-step cost to encourage timely exits
+TIME_PENALTY = 0.01     # per-step cost to encourage timely exits (1% of position value per step)
 
 # v8: No hard TP/SL — model learns to exit via SELL action
 # Actions: 0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL_CLOSE
