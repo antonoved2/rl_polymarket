@@ -1,12 +1,11 @@
 """
-PPO Training v10 — edge-based statistical arbitrage.
+PPO Training v12 — small positions, max hold limit.
 
-Key changes from v9:
-- New environment_v4.py with fair price computation
-- Model learns to compare PM price vs fair price
-- BUY only when edge > 3% (mispricing detected)
-- SELL only when edge < 0.5% (mean-reversion complete)
-- Deterministic fair price from TA indicators
+Key changes from v11:
+- Position size: 10% → 2%
+- Max hold: 20 steps (auto-close after)
+- Forces model to re-evaluate positions quickly
+- Same 4 actions, no hard TP/SL
 """
 
 import argparse

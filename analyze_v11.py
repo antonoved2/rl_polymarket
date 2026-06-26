@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Analyze PPO v10 edge-based trades.
-Tracks: entries by edge, time-to-exit, PnL distribution.
+Analyze PPO v11 trades — pure model-driven, 4 actions.
+Tracks: entries, exits, PnL distribution, action usage.
 """
 
 import sys
@@ -18,9 +18,8 @@ def analyze(model_path, asset="btc", n_episodes=200):
     print(f"Loading model: {model_path}")
     model = PPO.load(model_path)
 
-    all_trades = []  # completed trades
-    all_entries = []  # entry points
-    all_sells = []  # sell points
+    all_trades = []  # completed trades with PnL
+    all_entries = []
     all_data = []
 
     for ep in range(n_episodes):
@@ -38,7 +37,6 @@ def analyze(model_path, asset="btc", n_episodes=200):
         obs, _ = env.reset(seed=ep * 7 + 13)
         done = False
         step = 0
-        ep_obs_list = []
 
         while not done:
             action, _ = model.predict(obs, deterministic=True)
@@ -57,8 +55,6 @@ def analyze(model_path, asset="btc", n_episodes=200):
                 "had_position": had_position,
                 "has_position": env.position is not None,
                 "capital": env.capital,
-                "edge": info.get("edge", 0),
-                "fair_price": info.get("fair_price", 0.5),
                 "up_price": env.raw_data[env.current_data_idx]["up_price"] if env.current_data_idx < len(env.raw_data) else 0.5,
                 "pnl_delta": env.total_pnl - old_pnl,
             }
@@ -75,17 +71,16 @@ def analyze(model_path, asset="btc", n_episodes=200):
                     "capital_before": old_capital,
                 })
 
-            # Exit detected
+            # Exit detected (position was open, now closed)
             if had_position and env.position is None:
                 pnl = env.total_pnl - old_pnl
-                all_sells.append({
+                all_trades.append({
                     "episode": ep,
                     "step": step,
                     "pnl": pnl,
-                    "steps_held": step - env.current_step + 1 if env.current_step > 0 else 0,
+                    "capital_after": env.capital,
                 })
 
-            ep_obs_list.append(obs)
             done = terminated or truncated
             step += 1
 
@@ -94,7 +89,7 @@ def analyze(model_path, asset="btc", n_episodes=200):
     # ═══════════════════════════════════════════════════════════════════
 
     print(f"\n{'='*60}")
-    print(f"  V10 EDGE-BASED ANALYSIS ({n_episodes} episodes)")
+    print(f"  V11 ANALYSIS ({n_episodes} episodes)")
     print(f"{'='*60}")
 
     # 1. Action distribution
@@ -114,39 +109,31 @@ def analyze(model_path, asset="btc", n_episodes=200):
         print(f"  BUY_UP:   {len(up_entries)}")
         print(f"  BUY_DOWN: {len(down_entries)}")
 
-        # Edge at entry
-        edges = [e["edge"] for e in all_entries]
-        print(f"\n💰 EDGE AT ENTRY:")
-        print(f"  Mean:   {np.mean(edges):.4f} ({np.mean(edges)*100:.2f}%)")
-        print(f"  Median: {np.median(edges):.4f}")
-        print(f"  Min:    {np.min(edges):.4f}")
-        print(f"  Max:    {np.max(edges):.4f}")
-
-        # Edge buckets
-        buckets = [(0, 0.03), (0.03, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, 0.50)]
-        print(f"  Edge distribution:")
-        for lo, hi in buckets:
-            cnt = sum(1 for e in edges if lo <= e < hi)
-            print(f"    [{lo:.2f}-{hi:.2f}): {cnt}")
-
         # Entry price
         prices = [e["entry_price"] for e in all_entries]
-        print(f"\n💵 ENTRY PRICE:")
+        print(f"\n💰 ENTRY PRICE:")
         print(f"  Mean:   {np.mean(prices):.3f}")
         print(f"  Median: {np.median(prices):.3f}")
         print(f"  Min:    {np.min(prices):.3f}")
         print(f"  Max:    {np.max(prices):.3f}")
 
-        # Fair price at entry
-        fairs = [e["fair_price"] for e in all_entries]
-        print(f"\n📐 FAIR PRICE AT ENTRY:")
-        print(f"  Mean:   {np.mean(fairs):.3f}")
-        print(f"  Median: {np.median(fairs):.3f}")
+        # Price buckets
+        buckets = [(0, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, 0.30), (0.30, 0.50), (0.50, 0.85)]
+        print(f"  Buckets:")
+        for lo, hi in buckets:
+            cnt = sum(1 for p in prices if lo <= p < hi)
+            print(f"    [{lo:.2f}-{hi:.2f}): {cnt}")
 
-    # 3. Sells
-    print(f"\n🔴 SELLS (exits): {len(all_sells)}")
-    if all_sells:
-        pnls = [s["pnl"] for s in all_sells]
+        # Entry timing
+        steps = [e["step"] for e in all_entries]
+        print(f"\n⏱️  ENTRY STEP:")
+        print(f"  Mean:   {np.mean(steps):.1f}")
+        print(f"  Median: {np.median(steps):.1f}")
+
+    # 3. Completed trades (with PnL)
+    print(f"\n🔴 COMPLETED TRADES: {len(all_trades)}")
+    if all_trades:
+        pnls = [t["pnl"] for t in all_trades]
         wins = sum(1 for p in pnls if p > 0)
         losses = sum(1 for p in pnls if p <= 0)
 
@@ -160,28 +147,14 @@ def analyze(model_path, asset="btc", n_episodes=200):
         print(f"    Max:    ${np.max(pnls):+.2f}")
 
         # PnL buckets
-        buckets = [(-999, -5), (-5, -2), (-2, 0), (0, 2), (2, 5), (5, 999)]
+        buckets = [(-999, -100), (-100, -50), (-50, -10), (-10, 0), (0, 10), (10, 50), (50, 100), (100, 999)]
         print(f"    PnL buckets:")
         for lo, hi in buckets:
             cnt = sum(1 for p in pnls if lo <= p < hi)
-            print(f"      [{lo:+.0f}, {hi:+.0f}): {cnt}")
+            if cnt > 0:
+                print(f"      [{lo:+d}, {hi:+d}): {cnt}")
 
-    # 4. Edge analysis — when does model see edge?
-    print(f"\n📊 EDGE DISTRIBUTION (all timesteps):")
-    all_edges = [d["edge"] for d in all_data]
-    print(f"  Mean:   {np.mean(all_edges):.4f}")
-    print(f"  Median: {np.median(all_edges):.4f}")
-    print(f"  Std:    {np.std(all_edges):.4f}")
-
-    # How often is edge > 3%?
-    big_edge = sum(1 for e in all_edges if abs(e) > 0.03)
-    print(f"  |edge| > 3%: {big_edge} ({big_edge/len(all_edges)*100:.1f}%)")
-    big_edge_up = sum(1 for e in all_edges if e > 0.03)
-    big_edge_down = sum(1 for e in all_edges if e < -0.03)
-    print(f"    edge > 3% (UP cheap):   {big_edge_up}")
-    print(f"    edge < -3% (UP expensive): {big_edge_down}")
-
-    # 5. Episode PnL
+    # 4. Episode PnL
     print(f"\n📈 EPISODE PnL:")
     ep_pnls = []
     for ep in range(n_episodes):
@@ -199,6 +172,16 @@ def analyze(model_path, asset="btc", n_episodes=200):
         print(f"  Std PnL:    ${np.std(ep_pnls):.2f}")
         print(f"  Min PnL:    ${np.min(ep_pnls):+.2f}")
         print(f"  Max PnL:    ${np.max(ep_pnls):+.2f}")
+
+    # 5. SELL analysis
+    print(f"\n🔴 SELL ACTION ANALYSIS:")
+    sell_data = [d for d in all_data if d["action"] == 3]
+    print(f"  Total SELL: {len(sell_data)}")
+    if sell_data:
+        sell_with_pos = sum(1 for d in sell_data if d["had_position"])
+        sell_without_pos = sum(1 for d in sell_data if not d["had_position"])
+        print(f"  With position:    {sell_with_pos}")
+        print(f"  Without position: {sell_without_pos}")
 
     print(f"\n{'='*60}")
 

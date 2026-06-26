@@ -32,8 +32,9 @@ from dataclasses import dataclass
 ASSETS = ["btc", "eth", "sol"]
 TIMESTEPS_PER_PERIOD = 90
 TAKER_FEE_RATE = 0.025
-POSITION_SIZE_PCT = 0.10
+POSITION_SIZE_PCT = 0.02
 MIN_HOLD_STEPS = 3
+MAX_HOLD_STEPS = 20
 COOLDOWN_STEPS = 3
 OVERTRADE_PENALTY = 0.002
 N_FEATURES = 45
@@ -357,7 +358,7 @@ class PolymarketEnvV4(gym.Env):
                     trade_executed = True
                     reward -= OVERTRADE_PENALTY
 
-        elif action == 3:  # SELL  position
+        elif action == 3:  # SELL — close position
             if self.position is not None:
                 steps_held = self.current_step - self.position.entry_step
                 if steps_held >= self.min_hold_steps:
@@ -366,6 +367,16 @@ class PolymarketEnvV4(gym.Env):
                     if self.capital > 0 and self.position_size_pct > 0:
                         reward = pnl / (self.capital * self.position_size_pct + 1e-8)
                     trade_executed = True
+
+        # Auto-close after MAX_HOLD_STEPS (force model to re-evaluate)
+        if self.position is not None:
+            steps_held = self.current_step - self.position.entry_step
+            if steps_held >= MAX_HOLD_STEPS:
+                exit_price = up_price if self.position.side == 1 else down_price
+                pnl, is_win = self._close_position(exit_price)
+                if self.capital > 0 and self.position_size_pct > 0:
+                    reward = pnl / (self.capital * self.position_size_pct + 1e-8)
+                trade_executed = True
 
         return reward, trade_executed
 
