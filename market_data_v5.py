@@ -141,12 +141,12 @@ class MarketDataFetcherV5:
             result[f"ob_depth_imbalance_{level}"] = (bv - av) / dt if dt > 0 else 0.0
 
         # Walls
-        if bids:
-            avg_bid_size = total_bid / len(bids)
-            result["ob_wall_bid"] = max((q / avg_bid_size - 1.0, 0.0) for _, q in bids[:5]) if avg_bid_size > 0 else 0.0
-        if asks:
-            avg_ask_size = total_ask / len(asks)
-            result["ob_wall_ask"] = max((q / avg_ask_size - 1.0, 0.0) for _, q in asks[:5]) if avg_ask_size > 0 else 0.0
+        if bids and avg_bid_size > 0:
+            wall_bid = max(q / avg_bid_size - 1.0 for _, q in bids[:5])
+            result["ob_wall_bid"] = max(wall_bid, 0.0)
+        if asks and avg_ask_size > 0:
+            wall_ask = max(q / avg_ask_size - 1.0 for _, q in asks[:5])
+            result["ob_wall_ask"] = max(wall_ask, 0.0)
 
         # Slopes
         if len(bids) >= 5 and sum(q for _, q in bids[:1]) > 0:
