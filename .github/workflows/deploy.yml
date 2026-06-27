@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install stable-baselines3==2.3.0 gymnasium numpy requests
+          pip install -r requirements.txt
           pip install py-clob-client 2>/dev/null || echo "py-clob-client optional"
 
       - name: Verify environment

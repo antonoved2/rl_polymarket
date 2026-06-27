@@ -1,0 +1,4 @@
+stable-baselines3==2.3.0
+gymnasium>=0.29.0
+numpy>=1.24.0
+requests>=2.31.0
