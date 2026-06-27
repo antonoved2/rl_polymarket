@@ -24,19 +24,19 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install stable-baselines3==2.3.0 gymnasium numpy requests
-          pip install py-clob-client
+          pip install py-clob-client 2>/dev/null || echo "py-clob-client optional"
 
       - name: Verify environment
         run: |
-          python -c "from environment_v3 import PolymarketEnvV3; print('Env OK')"
-          python -c "from rl_live_trader import RLTrader; print('Trader OK')"
+          python -c "from environment_v5 import PolymarketEnvV7; print('Env OK')"
+          python -c "from rl_live_trader_v2 import RLTraderV2; print('Trader OK')"
 
       - name: Find latest model
         id: model
         run: |
-          MODEL=$(ls models/ppo_v5_btc_steps*.zip 2>/dev/null | head -1)
+          MODEL=$(ls models/ppo_v8_btc_steps*.zip 2>/dev/null | head -1)
           if [ -z "$MODEL" ]; then
-            MODEL=$(ls models/ppo_*btc*.zip 2>/dev/null | head -1)
+            MODEL=$(ls models/ppo_*btc*.zip 2>/dev/null | sort | tail -1)
           fi
           echo "model=$MODEL" >> $GITHUB_OUTPUT
           echo "Latest model: $MODEL"
@@ -59,8 +59,9 @@ jobs:
             cd /opt/rl_trader
 
             # Download from GitHub raw
-            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/rl_live_trader.py" -o rl_live_trader.py
-            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/environment_v3.py" -o environment_v3.py
+            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/rl_live_trader_v2.py" -o rl_live_trader_v2.py
+            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/environment_v5.py" -o environment_v5.py
+            curl -sL "https://raw.githubusercontent.com/antonoved2/rl_polymarket/master/market_data_v5.py" -o market_data_v5.py
 
             echo "[Deploy] Model is already on VPS (not stored in git)"
 
@@ -69,14 +70,15 @@ jobs:
             find /opt/rl_trader -name "*.pyc" -delete 2>/dev/null || true
 
             echo "[Deploy] Starting bot..."
-            setsid /opt/rl_trader/venv/bin/python3 /opt/rl_trader/rl_live_trader.py \
-              --model /opt/rl_trader/models/ppo_v4_btc_steps150000.zip \
+            setsid /opt/rl_trader/venv/bin/python3 /opt/rl_trader/rl_live_trader_v2.py \
+              --model /opt/rl_trader/models/ppo_v8_btc_steps500000.zip \
               --asset btc \
               --hours 168 \
-              --poll-interval 5 \
+              --poll-interval 15 \
               --capital 1000 \
               --dry-run \
-              --position-size 0.10 \
+              --position-size 0.02 \
+              --max-drawdown 0.20 \
               > /tmp/rl_trader.log 2>&1 &
 
             echo "[Deploy] Done! PID: $!"

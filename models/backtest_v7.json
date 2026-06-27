@@ -1,0 +1,17 @@
+{
+  "avg_capital": 1825.0860223526702,
+  "avg_pnl": 683.508634540706,
+  "avg_return": 82.50860223526702,
+  "median_return": 60.28871073564949,
+  "std_return": 84.68278760827172,
+  "sharpe": 0.9743255337429122,
+  "max_drawdown": 85.61119377651485,
+  "profit_factor": Infinity,
+  "win_rate_trades": 87.66114180478822,
+  "win_rate_episodes": 100.0,
+  "total_trades": 543,
+  "avg_win": 683.508634540706,
+  "avg_loss": 0.0,
+  "min_capital": 1088.3891148962794,
+  "max_capital": 7613.933704093693
+}

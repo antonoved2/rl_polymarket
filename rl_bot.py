@@ -53,13 +53,13 @@ TAKER_FEE = 0.025
 MIN_HOLD_STEPS = 5
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Feature Extractor (same as environment.py)
+# Feature Extractor (same as environment_v4.py v5)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class FeatureExtractor:
-    """Извлекает 45 нормализованных фичей — совместимо с PPO v4+ моделью."""
+    """Извлекает 75 нормализованных фичей — совместимо с PPO v6 (environment_v5)."""
 
-    N_FEATURES = 45
+    N_FEATURES = 75
 
     def __init__(self, lookback=5):
         self.lookback = lookback
@@ -68,7 +68,8 @@ class FeatureExtractor:
 
     def update(self, up_price, down_price, binance_price=0.0, binance_return_1m=0.0,
                binance_return_5m=0.0, volatility=0.0, elapsed_sec=0, period_start_ts=0,
-               ta_data=None):
+               ta_data=None, ob_data=None, tf_data=None, position_side=0, unrealized_pnl=0.0):
+        """Extract 75 features. ob_data and tf_data are dicts from Binance API."""
         mid_price = float(up_price)
         self.price_history.append(mid_price)
         max_len = self.lookback + 1
@@ -87,25 +88,22 @@ class FeatureExtractor:
         features[0] = np.clip(up_price, 0.0, 1.0)
         features[1] = np.clip(down_price, 0.0, 1.0)
         features[2] = np.clip(up_price + down_price - 1.0, -0.1, 0.1) * 10.0
-
         if len(self.price_history) >= 6:
             features[3] = np.clip((self.price_history[-1] - self.price_history[-6]) * 10.0, -1.0, 1.0)
         if len(self.price_history) >= 2:
             features[4] = np.clip((self.price_history[-1] - self.price_history[0]) * 5.0, -1.0, 1.0)
 
-        # === Order Book features (5-9) ===
-        base_spread = 0.005 + 0.02 * (1.0 - abs(up_price - 0.5) * 2)
-        spread = min(base_spread, 0.05)
-        features[5] = np.clip(spread * 20.0, 0.0, 1.0)
-
+        # === Volatility features (5-9) ===
         if len(self.price_history) >= 6:
-            features[6] = np.clip((self.price_history[-1] - self.price_history[-6]) * 20.0, -1.0, 1.0)
+            features[5] = np.clip((self.price_history[-1] - self.price_history[-6]) * 20.0, -1.0, 1.0)
         if len(self.return_history) >= 2:
-            features[7] = np.clip(abs(self.return_history[-1]) * 50.0, 0.0, 1.0)
+            features[6] = np.clip(abs(self.return_history[-1]) * 50.0, 0.0, 1.0)
         if len(self.return_history) >= 3:
-            features[8] = 1.0 if abs(self.return_history[-1]) > 0.05 else 0.0
+            features[7] = 1.0 if abs(self.return_history[-1]) > 0.05 else 0.0
         if len(self.return_history) >= 3:
-            features[9] = np.clip((self.return_history[-1] - self.return_history[-3]) * 50.0, -1.0, 1.0)
+            features[8] = np.clip((self.return_history[-1] - self.return_history[-3]) * 50.0, -1.0, 1.0)
+        if len(self.return_history) >= 5:
+            features[9] = np.clip(np.std(self.return_history[-5:]) * 200.0, 0.0, 1.0)
 
         # === Cross-market (10-13) ===
         features[10] = np.clip(binance_return_1m * 100.0, -1.0, 1.0)
@@ -121,9 +119,9 @@ class FeatureExtractor:
         features[14] = remaining / 900.0
 
         # === Position (15-17) ===
-        features[15] = 0.0
-        features[16] = 0.0
-        features[17] = 0.0
+        features[15] = 1.0 if position_side != 0 else 0.0
+        features[16] = float(position_side)
+        features[17] = np.clip(unrealized_pnl, -1.0, 1.0)
 
         # === Regime (18-19) ===
         if len(self.price_history) >= 5:
@@ -134,21 +132,52 @@ class FeatureExtractor:
         if len(self.return_history) >= 5:
             features[19] = np.clip(np.std(self.return_history[-5:]) * 200.0, 0.0, 1.0)
 
-        # === TA indicators (20-44) ===
+        # === Order Book features (20-34) ===
+        if ob_data:
+            features[20] = np.clip(ob_data.get("ob_imbalance", 0.0), -1.0, 1.0)
+            features[21] = np.clip(ob_data.get("ob_spread_bps", 2.0) / 10.0, 0.0, 1.0)
+            features[22] = np.clip(ob_data.get("ob_bid_depth_5", 0.0) / 100.0, 0.0, 1.0)
+            features[23] = np.clip(ob_data.get("ob_ask_depth_5", 0.0) / 100.0, 0.0, 1.0)
+            features[24] = np.clip(ob_data.get("ob_bid_depth_20", 0.0) / 500.0, 0.0, 1.0)
+            features[25] = np.clip(ob_data.get("ob_ask_depth_20", 0.0) / 500.0, 0.0, 1.0)
+            features[26] = np.clip(ob_data.get("ob_depth_imbalance_5", 0.0), -1.0, 1.0)
+            features[27] = np.clip(ob_data.get("ob_depth_imbalance_20", 0.0), -1.0, 1.0)
+            features[28] = np.clip(ob_data.get("ob_wall_bid", 0.0), 0.0, 1.0)
+            features[29] = np.clip(ob_data.get("ob_wall_ask", 0.0), 0.0, 1.0)
+            features[30] = np.clip(ob_data.get("ob_slope_bid", 0.0), -1.0, 1.0)
+            features[31] = np.clip(ob_data.get("ob_slope_ask", 0.0), -1.0, 1.0)
+            features[32] = np.clip(ob_data.get("ob_spread", 0.0) * 20.0, 0.0, 1.0)
+            features[33] = np.clip(ob_data.get("ob_bid_depth_10", 0.0) / 200.0, 0.0, 1.0)
+            features[34] = np.clip(ob_data.get("ob_ask_depth_10", 0.0) / 200.0, 0.0, 1.0)
+        # else: zeros (placeholder)
+
+        # === Trade Flow features (35-42) ===
+        if tf_data:
+            features[35] = np.clip(tf_data.get("tf_buy_ratio", 0.5), 0.0, 1.0)
+            features[36] = np.clip(tf_data.get("tf_flow_imbalance", 0.0), -1.0, 1.0)
+            features[37] = np.clip(tf_data.get("tf_large_trades", 0.0), 0.0, 1.0)
+            features[38] = np.clip(tf_data.get("tf_avg_size", 0.0) * 10.0, 0.0, 1.0)
+            features[39] = np.clip(tf_data.get("tf_size_variance", 0.5), 0.0, 1.0)
+            features[40] = np.clip(tf_data.get("tf_aggression", 0.5), 0.0, 1.0)
+            features[41] = np.clip(tf_data.get("tf_buy_volume", 0.0) / 1e6, 0.0, 1.0)
+            features[42] = np.clip(tf_data.get("tf_sell_volume", 0.0) / 1e6, 0.0, 1.0)
+        # else: zeros (placeholder)
+
+        # === TA indicators (43-74) ===
         if ta_data:
             ta_fields = [
+                "sma_5", "sma_10", "sma_20", "ema_5", "ema_10", "ema_12", "ema_26", "ema_50",
                 "ma_cross_5_20", "ma_cross_10_20", "ma_cross_ema_12_26",
                 "price_vs_sma20", "price_vs_ema50",
                 "rsi", "macd_line", "macd_signal", "macd_hist",
-                "bb_width", "bb_pct_b", "bb_upper", "bb_lower",
-                "atr_pct", "stoch_k", "stoch_d",
-                "vol_ratio", "obv",
+                "bb_lower", "bb_middle", "bb_upper", "bb_width", "bb_pct_b",
+                "atr", "atr_pct", "stoch_k", "stoch_d", "stoch_cross",
+                "vol_ratio", "obv", "realized_vol",
                 "momentum_5", "momentum_10",
-                "sma_5", "sma_10", "sma_20", "ema_12", "ema_26",
             ]
             for i, field in enumerate(ta_fields):
                 val = ta_data.get(field, 0.0)
-                features[20 + i] = np.clip(float(val), -1.0, 1.0)
+                features[43 + i] = np.clip(float(val), -1.0, 1.0)
 
         return features
 
