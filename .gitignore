@@ -18,5 +18,8 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Data files (too large for GitHub, stored on VPS)
+data/*.jsonl
+
 # Logs
 *.log
