@@ -32,6 +32,38 @@ import json
 import os
 import sys
 import time
+
+# Force IPv4 globally — IPv6 connections hang on VPS
+import socket
+_orig_gai = socket.getaddrinfo
+def _ipv4_gai(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_gai(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_gai
+
+# Graceful shutdown on SIGTERM (systemd stop)
+import signal
+_running = True
+def _sigterm_handler(signum, frame):
+    global _running
+    _running = False
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT, _sigterm_handler)
+
+# Force line buffering for log files
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(line_buffering=True)
+
+# Global exception handler to log errors
+import traceback as _tb
+
+def _global_excepthook(exc_type, exc_value, exc_tb):
+    msg = ''.join(_tb.format_exception(exc_type, exc_value, exc_tb))
+    sys.stdout.write(f'EXCEPTION: {msg}\n')
+    sys.stdout.flush()
+
+sys.excepthook = _global_excepthook
 import math
 import signal
 import requests
@@ -41,6 +73,13 @@ from pathlib import Path
 from collections import defaultdict
 
 from stable_baselines3 import PPO
+
+# Trend-aware TP/SL
+try:
+    from trend_tpsl import check_tpsl, get_trend_tpsl
+    HAS_TREND_TPSL = True
+except ImportError:
+    HAS_TREND_TPSL = False
 
 try:
     from py_clob_client import ClobClient
@@ -77,6 +116,10 @@ COOLDOWN_TICKS = 3
 MAX_DRAWSOWN_PCT = 0.20     # 20% max drawdown → stop trading
 DAILY_LOSS_LIMIT_PCT = 0.10  # 10% daily loss → stop for the day
 MAX_POSITIONS_PER_PERIOD = 1  # max 1 position per period
+TAKE_PROFIT_PCT = 0.15       # 15% take profit (default, overridden by trend-aware)
+STOP_LOSS_PCT = 0.08         # 8% stop loss (default, overridden by trend-aware)
+MAX_HOLD_STEPS = 40          # max steps before forced close
+TRCT = 0.05     # 5%USE_TRAILING_STOP = True
 
 # Telegram
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -771,6 +814,11 @@ class RLTraderV2:
             return period_info.get("up_token_id", "") if side_str == "UP" else period_info.get("down_token_id", "")
 
         if action == 0:  # HOLD
+            # Check TP/SL for open positions
+            if self.position is not None:
+                up_p = period_info.get("up_price", 0.5)
+                down_p = period_info.get("down_price", 0.5)
+                self._check_tp_sl(up_p, down_p)
             return None
 
         elif action == 3:  # SELL
@@ -832,6 +880,103 @@ class RLTraderV2:
 
         return None
 
+    def _check_tp_sl(self, up_price, down_price):
+        """Check take-profit / stop-loss with trend-aware logic."""
+        if self.position is None:
+            return
+        
+        pos = self.position
+        side_str = "UP" if pos["side"] == 1 else "DOWN"
+        current_price = up_price if pos["side"] == 1 else down_price
+        entry_price = pos["entry_price"]
+        steps_held = self.current_step - pos["entry_step"]
+        
+        # Calculate unrealized PnL %
+        if entry_price > 0:
+            pnl_pct = (current_price - entry_price) / entry_price
+        else:
+            return
+        
+        # Get trend info from TA data if available
+        adx = 0.0
+        trend_regime = 0.0
+        if hasattr(self, '_latest_ta') and self._latest_ta:
+            # ADX and regime from precomputed data
+            adx = self._latest_ta.get("adx", 0.0)
+            trend_regime = self._latest_ta.get("trend_regime", 0.0)
+        
+        # Determine TP/SL thresholds
+        if HAS_TREND_TPSL and adx > 0:
+            # Trend-aware TP/SL
+            peak_price = pos.get("peak_price", current_price)
+            # Update peak
+            if current_price > peak_price:
+                self.position["peak_price"] = current_price
+                peak_price = current_price
+            
+            trend_aligned = (
+                (pos["side"] == 1 and trend_regime > 0) or
+                (pos["side"] == -1 and trend_regime < 0)
+            )
+            params = get_trend_tpsl(adx, trend_regime, pos["side"], trend_aligned)
+            tp_pct = params.take_profit_pct
+            sl_pct = params.stop_loss_pct
+            max_hold = params.max_hold_steps
+        else:
+            # Default static TP/SL (v8 behavior)
+            tp_pct = TAKE_PROFIT_PCT
+            sl_pct = STOP_LOSS_PCT
+            max_hold = MAX_HOLD_STEPS
+        
+        # Check TP
+        if pnl_pct >= tp_pct:
+            elapsed = steps_held * POLL_INTERVAL
+            reason = f"TP +{pnl_pct*100:.1f}%"
+            send_telegram(f"🎯 {reason} | {side_str} | {entry_price:.3f}→{current_price:.3f}")
+            self._close_position(current_price, pos.get("period", ""), elapsed)
+            return
+        
+        # Check SL
+        if pnl_pct <= -sl_pct:
+            elapsed = steps_held * POLL_INTERVAL
+            reason = f"SL -{abs(pnl_pct)*100:.1f}%"
+            send_telegram(f"🛑 {reason} | {side_str} | {entry_price:.3f}→{current_price:.3f}")
+            self._close_position(current_price, pos.get("period", ""), elapsed)
+            return
+        
+        # Check max hold
+        if steps_held >= max_hold:
+            elapsed = steps_held * POLL_INTERVAL
+            reason = f"MaxHold {steps_held} steps"
+            send_telegram(f"⏰ {reason} | {side_str} | PnL {pnl_pct*100:+.1f}%")
+            self._close_position(current_price, pos.get("period", ""), elapsed)
+            return
+        
+        # Check trailing stop (if trend-aware with trailing)
+        if HAS_TREND_TPSL and adx > 0:
+            params = get_trend_tpsl(adx, trend_regime, pos["side"], 
+                (pos["side"] == 1 and trend_regime > 0) or (pos["side"] == -1 and trend_regime < 0))
+            if params.trailing:
+                peak_price = pos.get("peak_price", entry_price)
+                if peak_price > entry_price:  # trailing only after profit
+                    trail_pct = params.trailing_pct
+                    if pos["side"] == 1:
+                        trail_level = peak_price * (1 - trail_pct)
+                        if current_price < trail_level:
+                            drop = (peak_price - current_price) / peak_price * 100
+                            elapsed = steps_held * POLL_INTERVAL
+                            send_telegram(f"📉 Trail -{drop:.1f}% | {side_str} | Peak {peak_price:.3f}→{current_price:.3f}")
+                            self._close_position(current_price, pos.get("period", ""), elapsed)
+                            return
+                    else:
+                        trail_level = peak_price * (1 + trail_pct)
+                        if current_price > trail_level:
+                            drop = (current_price - peak_price) / peak_price * 100
+                            elapsed = steps_held * POLL_INTERVAL
+                            send_telegram(f"📉 Trail -{drop:.1f}% | {side_str} | Peak {peak_price:.3f}→{current_price:.3f}")
+                            self._close_position(current_price, pos.get("period", ""), elapsed)
+                            return
+
     def _close_position(self, exit_price, period, elapsed):
         if self.position is None:
             return None
@@ -876,11 +1021,14 @@ class RLTraderV2:
         end_time = start_time + duration_hours * 3600
         iteration = 0
 
-        while time.time() < end_time and running:
+        global _running
+        while _running:
             iteration += 1
             try:
                 period_data = self.market_fetcher.get_current_period()
                 if not period_data:
+                    if iteration % 20 == 0:
+                        print(f"[{iteration}] No period data | Cap: ${self.capital:.2f}")
                     time.sleep(poll_interval)
                     continue
 
@@ -894,6 +1042,24 @@ class RLTraderV2:
 
                 ob_data = self.market_fetcher.get_order_book()
                 tf_data = self.market_fetcher.get_trade_flow()
+                
+                # Compute trend features for trend-aware TP/SL
+                self._latest_ta = ta_data or {}
+                if ta_data and HAS_TREND_TPSL and closes and len(closes) >= 10:
+                    # Compute ADX approximation from closes
+                    from trend_tpsl import compute_adx_simple
+                    self._latest_ta['adx'] = compute_adx_simple(closes)
+                    # Compute trend regime
+                    import numpy as _np
+                    recent = _np.array(closes[-10:])
+                    x = _np.arange(len(recent))
+                    slope = (_np.polyfit(x, recent, 1)[0] / _np.mean(recent)) * 100 if len(recent) > 0 else 0
+                    if slope > 0.2:
+                        self._latest_ta['trend_regime'] = 1.0
+                    elif slope < -0.2:
+                        self._latest_ta['trend_regime'] = -1.0
+                    else:
+                        self._latest_ta['trend_regime'] = 0.0
 
                 now = int(time.time())
                 current_period = (now // 900) * 900
@@ -904,22 +1070,30 @@ class RLTraderV2:
                     time.sleep(poll_interval)
                     continue
 
-                action, _ = self.model.predict(obs, deterministic=True)
+                # Epsilon-greedy exploration
+                epsilon = max(0.01, 0.2 * (0.995 ** self.current_step))  # Decay from 0.2 to 0.01
+                if random.random() < epsilon:
+                    action = random.choice([0, 1, 2, 3])  # Random action
+                    self.last_epsilon_action = True
+                else:
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    self.last_epsilon_action = False
+                
                 result = self.execute_action(int(action), period_data)
 
                 action_names = ["HOLD", "BUY_UP", "BUY_DOWN", "SELL"]
                 pos_str = f"POS={'UP' if self.position and self.position['side']==1 else 'DOWN' if self.position else 'NONE'}"
 
+                # Heartbeat every tick
+                print(f"[{iteration}] {action_names[int(action)]} | {pos_str} | {elapsed}s | Cap: ${self.capital:.2f}", flush=True)
+
                 if isinstance(result, dict):
                     if "action" in result:
-                        print(f"[{iteration}] {result['action']} @ {result['price']:.3f} | ${result['size_usd']:.2f} | Cap: ${self.capital:.2f}")
+                        print(f"  → {result['action']} @ {result['price']:.3f} | ${result['size_usd']:.2f}", flush=True)
                     elif "pnl" in result:
                         pnl_pct = result['pnl'] / result['size_usd'] * 100
                         emoji = "✅" if result['pnl'] > 0 else "❌"
-                        print(f"[{iteration}] {emoji} CLOSE {result['side']} | ${result['pnl']:.2f} ({pnl_pct:+.1f}%) | Cap: ${self.capital:.2f}")
-                else:
-                    if iteration % 50 == 0:
-                        print(f"[{iteration}] {action_names[int(action)]} | {pos_str} | {elapsed}s | Cap: ${self.capital:.2f}")
+                        print(f"  → {emoji} CLOSE {result['side']} | ${result['pnl']:.2f} ({pnl_pct:+.1f}%)", flush=True)
 
                 # Period end → close
                 if elapsed >= 895 and self.position is not None:
@@ -939,12 +1113,29 @@ class RLTraderV2:
 
             except KeyboardInterrupt:
                 break
+            except SystemExit:
+                break
             except Exception as e:
                 print(f"[Trader] Error: {e}")
                 import traceback
                 traceback.print_exc()
 
             time.sleep(poll_interval)
+
+        # Final close
+        if self.position is not None:
+            print(f"[Trader] Closing final position...")
+            side_str = "UP" if self.position["side"] == 1 else "DOWN"
+            exit_price = 0.5
+            try:
+                period_data = self.market_fetcher.get_current_period()
+                if period_data:
+                    for period, info in period_data.items():
+                        if period == current_period:
+                            exit_price = info.get("up_price", 0.5) if side_str == "UP" else info.get("down_price", 0.5)
+            except:
+                pass
+            self._close_position(exit_price, "final", 0)
 
         # Final close
         if self.position is not None:

@@ -39,6 +39,12 @@ COOLDOWN_STEPS = 5       # wait after closing before entering
 OVERTRADE_PENALTY = 0.005  # small penalty per trade to discourage churning
 TIME_PENALTY = 0.01     # per-step cost to encourage timely exits (1% of position value per step)
 
+# Reward shaping for SELL actions
+TAKE_PROFIT_REWARD = 1.5   # +1.5 for profitable exit
+STOP_LOSS_PENALTY = -1.5  # -1.5 for exit at loss
+EXIT_BONUS = 0.3         # +0.3 for any SELL (encourages learning)
+HOLD_PENALTY = -0.05    # -0.05 per step of holding (increases over time)
+
 # v8: No hard TP/SL — model learns to exit via SELL action
 # Actions: 0=HOLD, 1=BUY_UP, 2=BUY_DOWN, 3=SELL_CLOSE
 
@@ -52,7 +58,7 @@ class Position:
     entry_step: int    # step when opened
 
 
-N_FEATURES = 45  # 20 base + 25 TA
+N_FEATURES = 88  # 45 base + 25 TA + 3 new (volatility, spread) + 15 reserved
 
 _data_cache: Dict[Tuple[str, str], List[Dict]] = {}
 
@@ -188,6 +194,24 @@ class FeatureExtractor:
             val = getattr(state, f"ta_{field}", None)
             if val is not None:
                 features[20 + i] = np.clip(float(val), -1.0, 1.0)
+
+        # === New features: volatility and spread (indices 85-87) ===
+        if len(self.price_history) >= 5:
+            # Use price_history for volatility (it contains up_price values)
+            recent_prices = list(self.price_history)[-5:]
+            features[85] = np.clip(np.std(recent_prices), 0.0, 1.0)  # UP volatility
+            
+            # For DOWN volatility - need down_price history too
+            # Simplified: use same as UP for now
+            features[86] = features[85]  # DOWN volatility (simplified)
+            
+            # Spread calculation
+            current_spread = abs(state.up_price - state.down_price) / ((state.up_price + state.down_price) / 2 + 1e-8)
+            features[87] = np.clip(current_spread * 10.0, 0.0, 1.0)  # Spread
+        else:
+            features[85] = 0.0
+            features[86] = 0.0
+            features[87] = 0.0
 
         return features
 
@@ -428,10 +452,10 @@ class PolymarketEnvV3(gym.Env):
         idx = self.current_data_idx
 
         if action == 0:  # HOLD
-            # Small time cost for holding too long
+            # Time cost increases with holding duration
             if self.position is not None:
                 steps_held = self.current_step - self.position.entry_step
-                reward -= TIME_PENALTY * steps_held  # increasing cost over time
+                reward += HOLD_PENALTY * steps_held  # Increasing cost over time
 
         elif action == 1:  # BUY UP
             if self.position is None:
@@ -455,8 +479,18 @@ class PolymarketEnvV3(gym.Env):
                     current_down = self.raw_data[idx]["down_price"]
                     exit_price = current_up if self.position.side == 1 else current_down
                     pnl, is_win = self._close_position(exit_price)
-                    if self.position_size_pct > 0:
-                        reward = pnl / (self.capital * self.position_size_pct + 1e-8)
+                    
+                    # Reward shaping for SELL
+                    if is_win:
+                        reward = pnl / (self.capital * self.position_size_pct + 1e-8) + TAKE_PROFIT_REWARD
+                    else:
+                        reward = pnl / (self.capital * self.position_size_pct + 1e-8) + STOP_LOSS_PENALTY
+                    reward += EXIT_BONUS  # Bonus for any SELL
+                    
+                    # Subtract fees from reward to teach model about real costs
+                    fee_penalty = self.taker_fee * 2  # Entry + exit fee
+                    reward -= fee_penalty * 0.5  # 0.025 penalty for trading
+                    
                     trade_executed = True
 
         return reward, trade_executed
