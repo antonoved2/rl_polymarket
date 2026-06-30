@@ -58,7 +58,7 @@ class Position:
     entry_step: int    # step when opened
 
 
-N_FEATURES = 88  # 45 base + 25 TA + 3 new (volatility, spread) + 15 reserved
+N_FEATURES = 98  # 45 base + 25 TA + 3 new (volatility, spread) + 10 rolling window + 15 reserved
 
 _data_cache: Dict[Tuple[str, str], List[Dict]] = {}
 
@@ -212,6 +212,15 @@ class FeatureExtractor:
             features[85] = 0.0
             features[86] = 0.0
             features[87] = 0.0
+
+        # === Rolling Window features (indices 88-97) ===
+        # Add last 10 price values as features (normalized)
+        price_window = list(self.price_history)[-10:]  # Last 10 prices
+        for i in range(10):
+            if i < len(price_window):
+                features[88 + i] = np.clip(price_window[i], 0.0, 1.0)
+            else:
+                features[88 + i] = 0.0  # Padding
 
         return features
 
@@ -452,10 +461,19 @@ class PolymarketEnvV3(gym.Env):
         idx = self.current_data_idx
 
         if action == 0:  # HOLD
-            # Time cost increases with holding duration
+            # === PROFIT-BASED REWARD for HOLD (Priority 1) ===
             if self.position is not None:
+                # Small penalty for holding (time cost)
                 steps_held = self.current_step - self.position.entry_step
-                reward += HOLD_PENALTY * steps_held  # Increasing cost over time
+                reward -= steps_held * 0.001  # Small time cost
+                
+                # If in position, reward = unrealized PnL (scaled)
+                current_up = self.raw_data[idx]["up_price"]
+                current_down = self.raw_data[idx]["down_price"]
+                current_price = current_up if self.position.side == 1 else current_down
+                unrealized_pnl = (current_price - self.position.entry_price) * self.position.shares
+                roi = unrealized_pnl / (self.position.size_usd + 1e-8)
+                reward += roi * 100  # Small reward for unrealized gains
 
         elif action == 1:  # BUY UP
             if self.position is None:
@@ -475,21 +493,28 @@ class PolymarketEnvV3(gym.Env):
             if self.position is not None:
                 steps_held = self.current_step - self.position.entry_step
                 if steps_held >= self.min_hold_steps:  # can't exit immediately
+                    # Save position info BEFORE closing
+                    position_size = self.position.size_usd
                     current_up = self.raw_data[idx]["up_price"]
                     current_down = self.raw_data[idx]["down_price"]
                     exit_price = current_up if self.position.side == 1 else current_down
                     pnl, is_win = self._close_position(exit_price)
                     
-                    # Reward shaping for SELL
-                    if is_win:
-                        reward = pnl / (self.capital * self.position_size_pct + 1e-8) + TAKE_PROFIT_REWARD
-                    else:
-                        reward = pnl / (self.capital * self.position_size_pct + 1e-8) + STOP_LOSS_PENALTY
-                    reward += EXIT_BONUS  # Bonus for any SELL
+                    # === PROFIT-BASED REWARD (Priority 1 fix) ===
+                    # Reward = normalized PnL (ROI-based)
+                    roi = pnl / (position_size + 1e-8)
+                    reward = roi * 10000  # Scale reward (similar to reward_scaling=1e-4 in FinRL)
                     
-                    # Subtract fees from reward to teach model about real costs
-                    fee_penalty = self.taker_fee * 2  # Entry + exit fee
-                    reward -= fee_penalty * 0.5  # 0.025 penalty for trading
+                    # Add bonus for winning, penalty for losing
+                    if is_win:
+                        reward += 0.5  # Win bonus
+                    else:
+                        reward -= 0.5  # Loss penalty
+                    
+                    # === MAX DRAWDOWN PENALTY (Priority 3) ===
+                    drawdown = (self.peak_capital - self.capital) / (self.peak_capital + 1e-8)
+                    if drawdown > 0.10:  # If drawdown > 10%
+                        reward -= drawdown * 2.0  # Extra penalty for large drawdown
                     
                     trade_executed = True
 
@@ -530,6 +555,12 @@ class PolymarketEnvV3(gym.Env):
 
         trade_reward, _ = self._execute_action(action)
         self.peak_capital = max(self.peak_capital, self.capital)
+
+        # === MAX DRAWDOWN PENALTY (Priority 3) ===
+        # Penalize large drawdowns at each step
+        drawdown = (self.peak_capital - self.capital) / (self.peak_capital + 1e-8)
+        if drawdown > 0.10:  # If drawdown > 10%
+            trade_reward -= drawdown * 0.5  # Small penalty per step
 
         self.current_step += 1
         self.current_data_idx += 1

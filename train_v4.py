@@ -89,14 +89,15 @@ def train(
 
     model = PPO(
         "MlpPolicy", env,
-        learning_rate=5e-5,
-        n_steps=1024,
-        batch_size=256,
-        n_epochs=20,
+        # === UPDATED HYPERPARAMETERS (based on FinRL analysis) ===
+        learning_rate=0.00025,  # Was: 5e-5 (5x higher! FinRL uses 0.00025)
+        n_steps=2048,          # Was: 1024 (2x higher! FinRL uses 2048)
+        batch_size=128,         # Was: 256 (2x lower! FinRL uses 128)
+        n_epochs=10,            # Was: 20 (2x lower, 10 is enough)
         gamma=0.995,
         gae_lambda=0.95,
         clip_range=0.1,
-        ent_coef=0.005,
+        ent_coef=0.01,         # Was: 0.005 (2x higher! FinRL uses 0.01)
         vf_coef=0.5,
         max_grad_norm=0.5,
         verbose=1,
